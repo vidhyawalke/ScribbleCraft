@@ -1,48 +1,76 @@
-import { Peer, DataConnection } from 'peerjs';
+/**
+ * CollaborationService — Firebase Realtime Database edition
+ *
+ * Architecture
+ * ─────────────
+ * Layer 1 — BroadcastChannel  (same browser, zero latency, always on)
+ * Layer 2 — Firebase RTDB      (cross-device / cross-network, ~50 ms latency)
+ *
+ * Firebase data layout
+ * ─────────────────────
+ * /rooms/{roomId}/
+ *   state/
+ *     writerId   : string          ← prevents our own writes from looping back
+ *     writerName : string
+ *     writerColor: string
+ *     timestamp  : number
+ *     elements   : CanvasElement[]
+ *   presence/
+ *     {userId}/
+ *       id        : string
+ *       name      : string
+ *       color     : string
+ *       lastActive: number
+ *       cursor    : { x, y } | null
+ *
+ * When a user closes/refreshes the tab, onDisconnect() automatically removes
+ * their presence node so other users stop seeing them as "online".
+ */
+
+import { ref, set, onValue, onDisconnect, DatabaseReference } from 'firebase/database';
+import { db, isFirebaseConfigured } from './firebaseConfig';
 import { CanvasElement, CollabMessage, CollabMessageType, Collaborator, Point } from '../types';
 
+// ─── Identity helpers ─────────────────────────────────────────────────────────
+
 const VIBRANT_COLORS = [
-  '#ef4444', // Red
-  '#f97316', // Orange
-  '#f59e0b', // Amber
-  '#10b981', // Emerald
-  '#06b6d4', // Cyan
-  '#3b82f6', // Blue
-  '#6366f1', // Indigo
-  '#8b5cf6', // Purple
-  '#ec4899', // Pink
+  '#ef4444', '#f97316', '#f59e0b', '#10b981',
+  '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899',
 ];
 
 const ADJECTIVES = ['Creative', 'Swift', 'Witty', 'Nimble', 'Bright', 'Cosmic', 'Daring', 'Epic', 'Jolly'];
-const ANIMALS = ['Fox', 'Owl', 'Panda', 'Falcon', 'Otter', 'Lynx', 'Koala', 'Tiger', 'Dolphin'];
+const ANIMALS    = ['Fox', 'Owl', 'Panda', 'Falcon', 'Otter', 'Lynx', 'Koala', 'Tiger', 'Dolphin'];
 
-const PEER_CONFIG = {
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-    ],
-  },
-};
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class CollaborationService {
   private static instance: CollaborationService | null = null;
 
   public localUser: Collaborator;
   public roomId: string = '';
-  
+
+  // ── BroadcastChannel (same-device multi-tab) ─────────────────────────────
   private broadcastChannel: BroadcastChannel | null = null;
-  private peer: Peer | null = null;
-  private connections: Map<string, DataConnection> = new Map();
-  private listeners: Array<(msg: CollabMessage) => void> = [];
-  private collaboratorsMap: Map<string, Collaborator> = new Map();
-  private onCollaboratorsChangeCallbacks: Array<(collaborators: Collaborator[]) => void> = [];
+
+  // ── Firebase references ──────────────────────────────────────────────────
+  private stateRef:       DatabaseReference | null = null;
+  private presenceRef:    DatabaseReference | null = null;
+  private presenceRoomRef: DatabaseReference | null = null;
+  private firebaseUnsubs: Array<() => void> = [];
+
+  // ── Debounce timers ──────────────────────────────────────────────────────
+  private elementsTimer: ReturnType<typeof setTimeout>  | null = null;
+  private cursorTimer:   ReturnType<typeof setTimeout>  | null = null;
+  private heartbeat:     ReturnType<typeof setInterval> | null = null;
+
+  // ── Listeners ────────────────────────────────────────────────────────────
+  private messageListeners: Array<(msg: CollabMessage) => void> = [];
+  private collaboratorsMap: Map<string, Collaborator>           = new Map();
+  private collabChangeCallbacks: Array<(list: Collaborator[]) => void> = [];
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   private constructor() {
-    // Generate or fetch guest identity
     let savedId = localStorage.getItem('scribble_collab_id');
     if (!savedId) {
       savedId = `user_${Math.random().toString(36).substring(2, 9)}`;
@@ -51,279 +79,300 @@ export class CollaborationService {
 
     let savedName = localStorage.getItem('scribble_collab_name');
     if (!savedName) {
-      const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+      const adj    = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
       const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
-      savedName = `${adj} ${animal}`;
+      savedName    = `${adj} ${animal}`;
       localStorage.setItem('scribble_collab_name', savedName);
     }
 
-    const savedColor = VIBRANT_COLORS[Math.floor(Math.random() * VIBRANT_COLORS.length)];
+    const color = VIBRANT_COLORS[Math.floor(Math.random() * VIBRANT_COLORS.length)];
 
-    this.localUser = {
-      id: savedId,
-      name: savedName,
-      color: savedColor,
-      lastActive: Date.now(),
-    };
+    this.localUser = { id: savedId, name: savedName, color, lastActive: Date.now() };
   }
 
   public static getInstance(): CollaborationService {
-    if (!this.instance) {
-      this.instance = new CollaborationService();
+    if (!CollaborationService.instance) {
+      CollaborationService.instance = new CollaborationService();
     }
-    return this.instance;
+    return CollaborationService.instance;
   }
 
+  // ─── Room initialisation ──────────────────────────────────────────────────
+
   public initRoom(roomIdFromUrl?: string): string {
-    // Determine room ID from URL search param or hash
+    // Resolve room ID from URL param or generate a fresh one
     let room = roomIdFromUrl;
     if (!room) {
-      const urlParams = new URLSearchParams(window.location.search);
-      room = urlParams.get('room') || '';
+      const params = new URLSearchParams(window.location.search);
+      room = params.get('room') || '';
     }
-
     if (!room) {
-      // Auto generate room ID if none present
       room = `room-${Math.random().toString(36).substring(2, 8)}`;
-      const newUrl = new URL(window.location.href);
-      newUrl.searchParams.set('room', room);
-      window.history.replaceState({}, '', newUrl.toString());
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', room);
+      window.history.replaceState({}, '', url.toString());
     }
-
     this.roomId = room;
 
-    // Set up BroadcastChannel for local multi-tab real-time sync
-    if (this.broadcastChannel) {
-      this.broadcastChannel.close();
-    }
+    // ── BroadcastChannel for same-device tabs ─────────────────────────────
+    this.broadcastChannel?.close();
     this.broadcastChannel = new BroadcastChannel(`scribble_room_${this.roomId}`);
-    this.broadcastChannel.onmessage = (event) => {
-      this.handleIncomingMessage(event.data);
-    };
+    this.broadcastChannel.onmessage = (ev) => this.handleIncomingMessage(ev.data);
 
-    // Set up PeerJS for cross-device / remote WebRTC sync
-    this.initPeerJS();
+    // ── Firebase for cross-device ─────────────────────────────────────────
+    this.initFirebase();
 
-    // Broadcast JOIN_ROOM message
-    this.broadcastMessage('JOIN_ROOM', { user: this.localUser });
+    // Announce presence to same-device tabs
+    this.postToBroadcastChannel('JOIN_ROOM', { user: this.localUser });
 
-    // Periodically clean up inactive collaborators (older than 10s)
+    // Periodically remove stale local collaborator entries
     setInterval(() => {
-      let changed = false;
       const now = Date.now();
-      this.collaboratorsMap.forEach((collab, id) => {
-        if (id !== this.localUser.id && now - collab.lastActive > 10000) {
+      let changed = false;
+      this.collaboratorsMap.forEach((c, id) => {
+        if (id !== this.localUser.id && now - c.lastActive > 30_000) {
           this.collaboratorsMap.delete(id);
           changed = true;
         }
       });
-      if (changed) {
-        this.notifyCollaboratorsChanged();
-      }
-    }, 3000);
+      if (changed) this.notifyCollabChange();
+    }, 8_000);
 
     return this.roomId;
   }
 
-  private initPeerJS() {
-    try {
-      if (this.peer) {
-        this.peer.destroy();
-        this.peer = null;
-      }
-      
-      const peerId = `scribble_${this.roomId}_${this.localUser.id}`;
-      const peer = new Peer(peerId, PEER_CONFIG);
-      this.peer = peer;
-      this.setupPeerListeners(peer);
-    } catch (e) {
-      console.warn('PeerJS failed to initialize:', e);
-    }
-  }
+  // ─── Firebase initialisation ──────────────────────────────────────────────
 
-  private setupPeerListeners(peer: Peer) {
-    peer.on('open', (id) => {
-      console.log('PeerJS connected with ID:', id);
-      // Only act if this is still the active peer
-      if (this.peer === peer) {
-        this.connectToRoomHost();
-      }
-    });
-
-    peer.on('connection', (conn) => {
-      this.setupConnection(conn);
-    });
-
-    peer.on('error', (err) => {
-      if (err.type === 'unavailable-id' && this.peer === peer) {
-        // Retry with a random suffix to avoid ID collision
-        const altId = `scribble_${this.roomId}_${this.localUser.id}_${Math.floor(Math.random() * 9999)}`;
-        try {
-          const newPeer = new Peer(altId, PEER_CONFIG);
-          this.peer = newPeer;
-          this.setupPeerListeners(newPeer);
-        } catch (e) {
-          console.warn('PeerJS retry failed:', e);
-        }
-      }
-    });
-
-    peer.on('disconnected', () => {
-      // Attempt reconnect if this is still the active peer
-      if (this.peer === peer && !peer.destroyed) {
-        try { peer.reconnect(); } catch (_) { /* ignore */ }
-      }
-    });
-  }
-
-  private connectToRoomHost() {
-    if (!this.peer) return;
-    const hostPeerId = `scribble_host_${this.roomId}`;
-    if (this.peer.id !== hostPeerId) {
-      const conn = this.peer.connect(hostPeerId, { reliable: true });
-      if (conn) {
-        this.setupConnection(conn);
-      }
-    }
-  }
-
-  private setupConnection(conn: DataConnection) {
-    this.connections.set(conn.peer, conn);
-
-    conn.on('open', () => {
-      // Send JOIN_ROOM upon connection open
-      conn.send({
-        type: 'JOIN_ROOM',
-        senderId: this.localUser.id,
-        senderName: this.localUser.name,
-        senderColor: this.localUser.color,
-        roomId: this.roomId,
-        payload: { user: this.localUser },
-        timestamp: Date.now(),
-      });
-    });
-
-    conn.on('data', (data: any) => {
-      this.handleIncomingMessage(data as CollabMessage);
-    });
-
-    conn.on('close', () => {
-      this.connections.delete(conn.peer);
-    });
-
-    conn.on('error', () => {
-      this.connections.delete(conn.peer);
-    });
-  }
-
-  public subscribe(listener: (msg: CollabMessage) => void): () => void {
-    this.listeners.push(listener);
-    return () => {
-      this.listeners = this.listeners.filter(l => l !== listener);
-    };
-  }
-
-  public onCollaboratorsChange(callback: (collaborators: Collaborator[]) => void): () => void {
-    this.onCollaboratorsChangeCallbacks.push(callback);
-    callback(Array.from(this.collaboratorsMap.values()));
-    return () => {
-      this.onCollaboratorsChangeCallbacks = this.onCollaboratorsChangeCallbacks.filter(c => c !== callback);
-    };
-  }
-
-  private notifyCollaboratorsChanged() {
-    const list = Array.from(this.collaboratorsMap.values());
-    this.onCollaboratorsChangeCallbacks.forEach(cb => cb(list));
-  }
-
-  public broadcastMessage(type: CollabMessageType, payload: any) {
-    const message: CollabMessage = {
-      type,
-      senderId: this.localUser.id,
-      senderName: this.localUser.name,
-      senderColor: this.localUser.color,
-      roomId: this.roomId,
-      payload,
-      timestamp: Date.now(),
-    };
-
-    // 1. BroadcastChannel (Same-device Multi-tab)
-    if (this.broadcastChannel) {
-      try {
-        this.broadcastChannel.postMessage(message);
-      } catch (e) {
-        console.error('BroadcastChannel error:', e);
-      }
-    }
-
-    // 2. PeerJS DataConnections (Cross-device WebRTC)
-    this.connections.forEach((conn) => {
-      if (conn.open) {
-        try {
-          conn.send(message);
-        } catch (e) {
-          console.error('PeerJS send error:', e);
-        }
-      }
-    });
-  }
-
-  public broadcastCursor(point: Point) {
-    this.localUser.cursor = point;
-    this.broadcastMessage('CURSOR_MOVE', { point });
-  }
-
-  public broadcastElements(elements: CanvasElement[]) {
-    this.broadcastMessage('ELEMENTS_UPDATE', { elements });
-  }
-
-  public broadcastClearCanvas() {
-    this.broadcastMessage('CLEAR_CANVAS', {});
-  }
-
-  public broadcastBgColor(bgColor: string) {
-    this.broadcastMessage('CHANGE_BG_COLOR', { bgColor });
-  }
-
-  public broadcastGridType(gridType: string) {
-    this.broadcastMessage('CHANGE_GRID_TYPE', { gridType });
-  }
-
-  private handleIncomingMessage(msg: CollabMessage) {
-    if (!msg || !msg.senderId || msg.senderId === this.localUser.id) return;
-    if (msg.roomId !== this.roomId) return;
-
-    // Track collaborator presence
-    const collab: Collaborator = {
-      id: msg.senderId,
-      name: msg.senderName,
-      color: msg.senderColor,
-      cursor: msg.type === 'CURSOR_MOVE' ? msg.payload?.point : this.collaboratorsMap.get(msg.senderId)?.cursor,
-      lastActive: Date.now(),
-    };
-    this.collaboratorsMap.set(msg.senderId, collab);
-    this.notifyCollaboratorsChanged();
-
-    // If new peer joined, notify listeners so room host can sync state
-    if (msg.type === 'JOIN_ROOM') {
-      this.listeners.forEach(l => l(msg));
+  private initFirebase() {
+    if (!db || !isFirebaseConfigured) {
+      console.info(
+        '%c[ScribbleCraft] Firebase not configured.\n' +
+        'Cross-device collaboration is disabled.\n' +
+        'Add VITE_FIREBASE_* vars to .env (local) or Vercel → Settings → Env Vars.',
+        'color: #f59e0b; font-weight: bold;'
+      );
       return;
     }
 
-    // Notify UI listeners
-    this.listeners.forEach(l => l(msg));
+    // Clean up any previous listeners
+    this.firebaseUnsubs.forEach(u => u());
+    this.firebaseUnsubs = [];
+
+    this.stateRef        = ref(db, `rooms/${this.roomId}/state`);
+    this.presenceRef     = ref(db, `rooms/${this.roomId}/presence/${this.localUser.id}`);
+    this.presenceRoomRef = ref(db, `rooms/${this.roomId}/presence`);
+
+    // ── Write my presence ─────────────────────────────────────────────────
+    const myPresence = {
+      id:         this.localUser.id,
+      name:       this.localUser.name,
+      color:      this.localUser.color,
+      lastActive: Date.now(),
+      cursor:     null,
+    };
+    set(this.presenceRef, myPresence).catch(console.error);
+    // Auto-remove on tab close / refresh
+    onDisconnect(this.presenceRef).remove();
+
+    // ── Listen for canvas state changes from other users ──────────────────
+    const unsubState = onValue(this.stateRef, (snap) => {
+      const data = snap.val() as {
+        writerId: string;
+        writerName: string;
+        writerColor: string;
+        timestamp: number;
+        elements: CanvasElement[];
+      } | null;
+
+      if (!data) return;
+      // IMPORTANT: skip our own writes to prevent echo loops
+      if (data.writerId === this.localUser.id) return;
+      if (!Array.isArray(data.elements)) return;
+
+      const msg: CollabMessage = {
+        type:        'ELEMENTS_UPDATE',
+        senderId:    data.writerId    || 'remote',
+        senderName:  data.writerName  || 'Remote User',
+        senderColor: data.writerColor || '#6366f1',
+        roomId:      this.roomId,
+        payload:     { elements: data.elements },
+        timestamp:   data.timestamp   || Date.now(),
+      };
+      this.messageListeners.forEach(l => l(msg));
+    });
+    this.firebaseUnsubs.push(unsubState);
+
+    // ── Listen for presence / cursor updates from everyone else ───────────
+    const unsubPresence = onValue(this.presenceRoomRef!, (snap) => {
+      const data = snap.val() as Record<string, any> | null;
+      if (!data) return;
+
+      const now = Date.now();
+      const seen = new Set<string>();
+
+      Object.values(data).forEach((user: any) => {
+        if (!user?.id || user.id === this.localUser.id) return;
+        if (now - (user.lastActive ?? 0) > 30_000) return; // stale
+
+        seen.add(user.id);
+        this.collaboratorsMap.set(user.id, {
+          id:         user.id,
+          name:       user.name   || 'Unknown',
+          color:      user.color  || '#6366f1',
+          cursor:     user.cursor ?? this.collaboratorsMap.get(user.id)?.cursor,
+          lastActive: user.lastActive ?? now,
+        });
+      });
+
+      // Remove users who disappeared from presence
+      this.collaboratorsMap.forEach((_, id) => {
+        if (!seen.has(id)) this.collaboratorsMap.delete(id);
+      });
+
+      this.notifyCollabChange();
+    });
+    this.firebaseUnsubs.push(unsubPresence);
+
+    // ── Heartbeat: refresh lastActive every 10 s ──────────────────────────
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = setInterval(() => {
+      if (!db || !this.presenceRef) return;
+      set(ref(db, `rooms/${this.roomId}/presence/${this.localUser.id}/lastActive`), Date.now())
+        .catch(() => { /* ignore; tab may be closing */ });
+    }, 10_000);
+  }
+
+  // ─── Public API ───────────────────────────────────────────────────────────
+
+  public subscribe(listener: (msg: CollabMessage) => void): () => void {
+    this.messageListeners.push(listener);
+    return () => { this.messageListeners = this.messageListeners.filter(l => l !== listener); };
+  }
+
+  public onCollaboratorsChange(callback: (list: Collaborator[]) => void): () => void {
+    this.collabChangeCallbacks.push(callback);
+    callback(Array.from(this.collaboratorsMap.values())); // immediate snapshot
+    return () => { this.collabChangeCallbacks = this.collabChangeCallbacks.filter(c => c !== callback); };
+  }
+
+  /**
+   * Sync canvas elements to all collaborators.
+   * - BroadcastChannel: instant (same browser)
+   * - Firebase: debounced 200 ms (cross-device)
+   */
+  public broadcastElements(elements: CanvasElement[]) {
+    // Layer 1 — instant same-device sync
+    this.postToBroadcastChannel('ELEMENTS_UPDATE', { elements });
+
+    // Layer 2 — Firebase cross-device sync (debounced to reduce writes)
+    if (!db || !isFirebaseConfigured || !this.stateRef) return;
+
+    if (this.elementsTimer) clearTimeout(this.elementsTimer);
+    this.elementsTimer = setTimeout(() => {
+      // Strip base64 image data from elements > 1 MB to avoid Firebase limits.
+      // Images are stored locally and are not needed for remote state.
+      const safeElements = elements.map(el => {
+        if (el.type === 'image' && el.imageUrl && el.imageUrl.length > 200_000) {
+          return { ...el, imageUrl: '' }; // placeholder; remote sees blank image slot
+        }
+        return el;
+      });
+
+      set(this.stateRef!, {
+        writerId:    this.localUser.id,
+        writerName:  this.localUser.name,
+        writerColor: this.localUser.color,
+        timestamp:   Date.now(),
+        elements:    safeElements,
+      }).catch(e => console.warn('[ScribbleCraft] Firebase write failed:', e));
+    }, 200);
+  }
+
+  /**
+   * Broadcast cursor position.
+   * - BroadcastChannel: instant
+   * - Firebase: debounced 80 ms  (high-frequency, keep writes cheap)
+   */
+  public broadcastCursor(point: Point) {
+    this.localUser.cursor = point;
+    this.postToBroadcastChannel('CURSOR_MOVE', { point });
+
+    if (!db || !isFirebaseConfigured) return;
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
+    this.cursorTimer = setTimeout(() => {
+      if (!db) return;
+      set(ref(db, `rooms/${this.roomId}/presence/${this.localUser.id}/cursor`), point).catch(() => {});
+    }, 80);
+  }
+
+  public broadcastClearCanvas() {
+    this.broadcastElements([]);
+  }
+
+  public broadcastBgColor(bgColor: string) {
+    this.postToBroadcastChannel('CHANGE_BG_COLOR', { bgColor });
+  }
+
+  public broadcastGridType(gridType: string) {
+    this.postToBroadcastChannel('CHANGE_GRID_TYPE', { gridType });
   }
 
   public updateLocalUserName(newName: string) {
     if (!newName.trim()) return;
     this.localUser.name = newName.trim();
     localStorage.setItem('scribble_collab_name', this.localUser.name);
-    this.broadcastMessage('JOIN_ROOM', { user: this.localUser });
+
+    // Update Firebase presence name immediately
+    if (db && isFirebaseConfigured) {
+      set(ref(db, `rooms/${this.roomId}/presence/${this.localUser.id}/name`), this.localUser.name).catch(() => {});
+    }
+    this.postToBroadcastChannel('JOIN_ROOM', { user: this.localUser });
   }
 
   public getShareableUrl(): string {
     const url = new URL(window.location.href);
     url.searchParams.set('room', this.roomId);
     return url.toString();
+  }
+
+  // ─── Internal helpers ─────────────────────────────────────────────────────
+
+  /** Post a CollabMessage to same-device tabs only. */
+  private postToBroadcastChannel(type: CollabMessageType, payload: any) {
+    if (!this.broadcastChannel) return;
+    const msg: CollabMessage = {
+      type,
+      senderId:    this.localUser.id,
+      senderName:  this.localUser.name,
+      senderColor: this.localUser.color,
+      roomId:      this.roomId,
+      payload,
+      timestamp:   Date.now(),
+    };
+    try { this.broadcastChannel.postMessage(msg); } catch { /* ignore */ }
+  }
+
+  /** Handle a message arriving from BroadcastChannel (same device). */
+  private handleIncomingMessage(msg: CollabMessage) {
+    if (!msg?.senderId || msg.senderId === this.localUser.id) return;
+    if (msg.roomId !== this.roomId) return;
+
+    // Track this collaborator locally
+    this.collaboratorsMap.set(msg.senderId, {
+      id:         msg.senderId,
+      name:       msg.senderName,
+      color:      msg.senderColor,
+      cursor:     msg.type === 'CURSOR_MOVE' ? msg.payload?.point : this.collaboratorsMap.get(msg.senderId)?.cursor,
+      lastActive: Date.now(),
+    });
+    this.notifyCollabChange();
+
+    // Forward to all UI subscribers
+    this.messageListeners.forEach(l => l(msg));
+  }
+
+  private notifyCollabChange() {
+    const list = Array.from(this.collaboratorsMap.values());
+    this.collabChangeCallbacks.forEach(cb => cb(list));
   }
 }
