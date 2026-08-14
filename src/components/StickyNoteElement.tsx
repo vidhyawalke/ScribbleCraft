@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { CanvasElement } from '../types';
 import { loadGoogleFont } from '../utils/googleFonts';
 
@@ -7,6 +7,7 @@ interface StickyNoteElementProps {
   isSelected: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onUpdateText: (id: string, newText: string) => void;
+  onResize?: (id: string, width: number, height: number) => void;
 }
 
 export const StickyNoteSvgDefs: React.FC = () => null;
@@ -16,59 +17,109 @@ export const StickyNoteElement: React.FC<StickyNoteElementProps> = ({
   isSelected,
   onSelect,
   onUpdateText,
+  onResize,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [text, setText] = useState(element.text || '');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Resize drag state (lives in DOM event listeners to avoid canvas interference)
+  const resizingRef = useRef<{
+    handle: string;
+    startX: number;
+    startY: number;
+    startW: number;
+    startH: number;
+  } | null>(null);
 
   const fontFamily = element.fontFamily || 'Caveat';
   const fontSize = element.fontSize || 26;
   const rotation = element.stickyRotation ?? 0;
   const bgColor = element.stickyBg || element.fillColor || '#ffeaa7';
 
-  // Calculate filter tint based on color if not default yellow
   const getFilterStyle = () => {
-    if (bgColor.includes('#ffb8b8') || bgColor.includes('pink') || bgColor.includes('#fee2e2')) {
+    if (bgColor.includes('#ffb8b8') || bgColor.includes('pink') || bgColor.includes('#fee2e2'))
       return 'hue-rotate(320deg) saturate(1.2)';
-    }
-    if (bgColor.includes('#bbebff') || bgColor.includes('blue') || bgColor.includes('#e0f2fe')) {
+    if (bgColor.includes('#bbebff') || bgColor.includes('blue') || bgColor.includes('#e0f2fe'))
       return 'hue-rotate(180deg) saturate(1.3)';
-    }
-    if (bgColor.includes('#c7f9cc') || bgColor.includes('green') || bgColor.includes('#dcfce7')) {
+    if (bgColor.includes('#c7f9cc') || bgColor.includes('green') || bgColor.includes('#dcfce7'))
       return 'hue-rotate(85deg) saturate(1.3)';
-    }
-    if (bgColor.includes('#e2d4f9') || bgColor.includes('purple')) {
+    if (bgColor.includes('#e2d4f9') || bgColor.includes('purple'))
       return 'hue-rotate(240deg) saturate(1.2)';
-    }
-    return 'none'; // Default yellow
+    return 'none';
   };
 
-  useEffect(() => {
-    loadGoogleFont(fontFamily);
-  }, [fontFamily]);
-
-  useEffect(() => {
-    setText(element.text || '');
-  }, [element.text]);
-
-  useEffect(() => {
-    if (isEditing && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [isEditing]);
+  useEffect(() => { loadGoogleFont(fontFamily); }, [fontFamily]);
+  useEffect(() => { setText(element.text || ''); }, [element.text]);
+  useEffect(() => { if (isEditing && textareaRef.current) textareaRef.current.focus(); }, [isEditing]);
 
   const handleBlur = () => {
     setIsEditing(false);
     onUpdateText(element.id, text);
   };
 
+  // ─── Resize via native DOM events (so it works outside the React canvas) ─────
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent, handle: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    resizingRef.current = {
+      handle,
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: element.width || 280,
+      startH: element.height || 280,
+    };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current || !onResize) return;
+      const { handle: h, startX, startY, startW, startH } = resizingRef.current;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      let newW = startW;
+      let newH = startH;
+
+      if (h === 'se') { newW = Math.max(120, startW + dx); newH = Math.max(120, startH + dy); }
+      else if (h === 'sw') { newW = Math.max(120, startW - dx); newH = Math.max(120, startH + dy); }
+      else if (h === 'ne') { newW = Math.max(120, startW + dx); newH = Math.max(120, startH - dy); }
+      else if (h === 'nw') { newW = Math.max(120, startW - dx); newH = Math.max(120, startH - dy); }
+      else if (h === 's') { newH = Math.max(120, startH + dy); }
+      else if (h === 'e') { newW = Math.max(120, startW + dx); }
+
+      onResize(element.id, newW, newH);
+    };
+
+    const onUp = () => {
+      resizingRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [element.id, element.width, element.height, onResize]);
+
+  // ─── Resize handle style ──────────────────────────────────────────────────────
+
+  const handleBase: React.CSSProperties = {
+    position: 'absolute',
+    width: '13px',
+    height: '13px',
+    background: '#ffffff',
+    border: '2px solid #6366f1',
+    borderRadius: '50%',
+    zIndex: 20,
+    boxShadow: '0 2px 6px rgba(99,102,241,0.35)',
+    // Show handles only when selected
+    opacity: isSelected ? 1 : 0,
+    pointerEvents: isSelected ? 'auto' : 'none',
+    transition: 'opacity 0.15s ease',
+  };
+
   return (
     <div
       onClick={onSelect}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        setIsEditing(true);
-      }}
+      onDoubleClick={(e) => { e.stopPropagation(); setIsEditing(true); }}
       className="sticky-container"
       style={{
         position: 'absolute',
@@ -85,7 +136,25 @@ export const StickyNoteElement: React.FC<StickyNoteElementProps> = ({
         userSelect: 'none',
       }}
     >
-      {/* Real Curled Sticky Note Image Background */}
+      {/* ── Resize Handles ─────────────────────────────────────────────────── */}
+
+      {/* Corners */}
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 'nw')}
+        title="Resize" style={{ ...handleBase, top: '-7px', left: '-7px', cursor: 'nw-resize' }} />
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 'ne')}
+        title="Resize" style={{ ...handleBase, top: '-7px', right: '-7px', cursor: 'ne-resize' }} />
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 'se')}
+        title="Resize" style={{ ...handleBase, bottom: '-7px', right: '-7px', cursor: 'se-resize' }} />
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 'sw')}
+        title="Resize" style={{ ...handleBase, bottom: '-7px', left: '-7px', cursor: 'sw-resize' }} />
+
+      {/* Edge midpoints */}
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 's')}
+        title="Resize height" style={{ ...handleBase, bottom: '-7px', left: '50%', marginLeft: '-6.5px', cursor: 's-resize' }} />
+      <div onMouseDown={(e) => handleResizeMouseDown(e, 'e')}
+        title="Resize width" style={{ ...handleBase, top: '50%', right: '-7px', marginTop: '-6.5px', cursor: 'e-resize' }} />
+
+      {/* ── Background Image ──────────────────────────────────────────────── */}
       <div
         style={{
           position: 'absolute',
@@ -98,7 +167,7 @@ export const StickyNoteElement: React.FC<StickyNoteElementProps> = ({
         }}
       />
 
-      {/* Sticky Note Content Container */}
+      {/* ── Content ───────────────────────────────────────────────────────── */}
       <div
         style={{
           position: 'relative',
@@ -124,9 +193,7 @@ export const StickyNoteElement: React.FC<StickyNoteElementProps> = ({
             onBlur={handleBlur}
             onKeyDown={(e) => {
               e.stopPropagation();
-              if (e.key === 'Escape') {
-                handleBlur();
-              }
+              if (e.key === 'Escape') handleBlur();
             }}
             placeholder="Type sticky note..."
             style={{

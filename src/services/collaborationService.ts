@@ -129,30 +129,51 @@ export class CollaborationService {
     try {
       if (this.peer) {
         this.peer.destroy();
+        this.peer = null;
       }
       
       const peerId = `scribble_${this.roomId}_${this.localUser.id}`;
-      this.peer = new Peer(peerId, PEER_CONFIG);
-
-      this.peer.on('open', (id) => {
-        console.log('PeerJS connected with ID:', id);
-        this.connectToRoomHost();
-      });
-
-      this.peer.on('connection', (conn) => {
-        this.setupConnection(conn);
-      });
-
-      this.peer.on('error', (err) => {
-        if (err.type === 'unavailable-id') {
-          // Alternative peer ID if collision
-          const altId = `scribble_${this.roomId}_${this.localUser.id}_${Math.floor(Math.random()*1000)}`;
-          this.peer = new Peer(altId, PEER_CONFIG);
-        }
-      });
+      const peer = new Peer(peerId, PEER_CONFIG);
+      this.peer = peer;
+      this.setupPeerListeners(peer);
     } catch (e) {
       console.warn('PeerJS failed to initialize:', e);
     }
+  }
+
+  private setupPeerListeners(peer: Peer) {
+    peer.on('open', (id) => {
+      console.log('PeerJS connected with ID:', id);
+      // Only act if this is still the active peer
+      if (this.peer === peer) {
+        this.connectToRoomHost();
+      }
+    });
+
+    peer.on('connection', (conn) => {
+      this.setupConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+      if (err.type === 'unavailable-id' && this.peer === peer) {
+        // Retry with a random suffix to avoid ID collision
+        const altId = `scribble_${this.roomId}_${this.localUser.id}_${Math.floor(Math.random() * 9999)}`;
+        try {
+          const newPeer = new Peer(altId, PEER_CONFIG);
+          this.peer = newPeer;
+          this.setupPeerListeners(newPeer);
+        } catch (e) {
+          console.warn('PeerJS retry failed:', e);
+        }
+      }
+    });
+
+    peer.on('disconnected', () => {
+      // Attempt reconnect if this is still the active peer
+      if (this.peer === peer && !peer.destroyed) {
+        try { peer.reconnect(); } catch (_) { /* ignore */ }
+      }
+    });
   }
 
   private connectToRoomHost() {
