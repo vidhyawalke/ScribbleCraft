@@ -78,6 +78,7 @@ export type CollabMessageType =
   | 'JOIN_ROOM'
   | 'SYNC_STATE'
   | 'ELEMENTS_UPDATE'
+  | 'LIVE_DRAW_PREVIEW'
   | 'CURSOR_MOVE'
   | 'CLEAR_CANVAS'
   | 'CHANGE_BG_COLOR'

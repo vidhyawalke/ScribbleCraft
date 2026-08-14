@@ -16,7 +16,9 @@ interface WhiteboardCanvasProps {
   gridType: 'dots' | 'lines' | 'none';
   isBoardLocked?: boolean;
   collaborators?: Collaborator[];
+  remotePreviews?: Record<string, CanvasElement>;
   onMouseMoveCursor?: (point: Point) => void;
+  onLiveDrawPreview?: (element: CanvasElement | null) => void;
   onToolComplete?: () => void;
   onInsertImage?: (file: File, pos?: Point) => void;
 }
@@ -59,7 +61,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   gridType,
   isBoardLocked = false,
   collaborators = [],
+  remotePreviews = {},
   onMouseMoveCursor,
+  onLiveDrawPreview,
   onToolComplete,
   onInsertImage,
 }) => {
@@ -274,7 +278,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     ctx.translate(panOffset.x, panOffset.y);
     ctx.scale(zoom, zoom);
 
-    const sorted = [...elements, ...(currentElement ? [currentElement] : [])].sort((a, b) => a.zIndex - b.zIndex);
+    const remotePreviewList = remotePreviews ? Object.values(remotePreviews).filter(Boolean) : [];
+    const sorted = [...elements, ...(currentElement ? [currentElement] : []), ...remotePreviewList].sort((a, b) => a.zIndex - b.zIndex);
 
     sorted.forEach((el) => {
       if (el.type === 'sticky') return; // DOM overlay
@@ -504,7 +509,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     }
 
     ctx.restore();
-  }, [elements, zoom, panOffset, selectedId, selectedIds, currentElement, bgColor, gridType, editingText, activeSnapAnchor, isBoardLocked, rubberBandBox]);
+  }, [elements, remotePreviews, zoom, panOffset, selectedId, selectedIds, currentElement, bgColor, gridType, editingText, activeSnapAnchor, isBoardLocked, rubberBandBox]);
 
   // Canvas resize observer
   useEffect(() => {
@@ -808,23 +813,26 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     // Drawing
     if (isDrawing && currentElement) {
+      let updatedEl: CanvasElement;
       if (currentElement.type === 'pencil') {
         const points = [...(currentElement.points || []), { x: pos.x - currentElement.x, y: pos.y - currentElement.y }];
         const xs = points.map((p) => p.x);
         const ys = points.map((p) => p.y);
-        setCurrentElement({ ...currentElement, points, width: Math.max(10, Math.max(...xs) - Math.min(...xs)), height: Math.max(10, Math.max(...ys) - Math.min(...ys)) });
+        updatedEl = { ...currentElement, points, width: Math.max(10, Math.max(...xs) - Math.min(...xs)), height: Math.max(10, Math.max(...ys) - Math.min(...ys)) };
       } else if (currentElement.type === 'arrow' || currentElement.type === 'line') {
         const snap = findClosestAnchor(pos);
         setActiveSnapAnchor(snap);
         const target = snap ? snap.point : pos;
         const w = target.x - startPoint.x;
         const h = target.y - startPoint.y;
-        setCurrentElement({ ...currentElement, x: startPoint.x, y: startPoint.y, width: w, height: h, points: [{ x: 0, y: 0 }, { x: w, y: h }], boundEndElementId: snap?.elementId, boundEndAnchor: snap?.anchor });
+        updatedEl = { ...currentElement, x: startPoint.x, y: startPoint.y, width: w, height: h, points: [{ x: 0, y: 0 }, { x: w, y: h }], boundEndElementId: snap?.elementId, boundEndAnchor: snap?.anchor };
       } else {
         const w = pos.x - startPoint.x;
         const h = pos.y - startPoint.y;
-        setCurrentElement({ ...currentElement, x: w < 0 ? pos.x : startPoint.x, y: h < 0 ? pos.y : startPoint.y, width: Math.abs(w), height: Math.abs(h) });
+        updatedEl = { ...currentElement, x: w < 0 ? pos.x : startPoint.x, y: h < 0 ? pos.y : startPoint.y, width: Math.abs(w), height: Math.abs(h) };
       }
+      setCurrentElement(updatedEl);
+      if (onLiveDrawPreview) onLiveDrawPreview(updatedEl);
     }
   };
 
@@ -873,6 +881,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       onSelectElement(currentElement.id);
       setSelectedIds([currentElement.id]);
       setCurrentElement(null);
+      if (onLiveDrawPreview) onLiveDrawPreview(null);
       if (onToolComplete) onToolComplete();
     }
   };

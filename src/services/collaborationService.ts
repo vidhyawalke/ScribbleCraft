@@ -262,6 +262,22 @@ export class CollaborationService {
         this.messageListeners.forEach((l) => l(msg));
       });
 
+      this.socket.on('live-draw-preview', (data: any) => {
+        if (!data || data.roomId !== this.roomId) return;
+        if (data.userId === this.localUser.id) return;
+
+        const msg: CollabMessage = {
+          type: 'LIVE_DRAW_PREVIEW',
+          senderId: data.userId || 'remote',
+          senderName: data.userName || 'Remote User',
+          senderColor: data.userColor || '#6366f1',
+          roomId: this.roomId,
+          payload: { element: data.element },
+          timestamp: Date.now(),
+        };
+        this.messageListeners.forEach((l) => l(msg));
+      });
+
       this.socket.on('cursor-move', (data: any) => {
         if (!data || data.roomId !== this.roomId) return;
         if (data.userId === this.localUser.id) return;
@@ -730,6 +746,37 @@ export class CollaborationService {
         this.cursorThrottleTimer = null;
       }, 16);
     }
+  }
+
+  /**
+   * Broadcast in-progress live drawing preview so collaborators see strokes/shapes in real time while dragging.
+   */
+  public broadcastLivePreview(element: CanvasElement | null) {
+    const msg: CollabMessage = {
+      type: 'LIVE_DRAW_PREVIEW',
+      senderId: this.localUser.id,
+      senderName: this.localUser.name,
+      senderColor: this.localUser.color,
+      roomId: this.roomId,
+      payload: { element },
+      timestamp: Date.now(),
+    };
+
+    this.postToBroadcastChannel('LIVE_DRAW_PREVIEW', { element });
+
+    if (this.socket && this.socket.connected) {
+      this.socket.emit('live-draw-preview', {
+        roomId: this.roomId,
+        element,
+        user: {
+          id: this.localUser.id,
+          name: this.localUser.name,
+          color: this.localUser.color,
+        },
+      });
+    }
+
+    this.sendToWebRTCPeers(msg);
   }
 
   public broadcastClearCanvas() {

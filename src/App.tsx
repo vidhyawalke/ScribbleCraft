@@ -34,6 +34,7 @@ export function App() {
       ? 'P2P WebRTC'
       : ''
   );
+  const [remotePreviews, setRemotePreviews] = useState<Record<string, CanvasElement>>({});
   const [isEditingName, setIsEditingName] = useState<boolean>(false);
   const [nameInput, setNameInput] = useState<string>(collabService.localUser.name);
   const [copiedToast, setCopiedToast] = useState<boolean>(false);
@@ -77,9 +78,33 @@ export function App() {
     const unsubMsg = collabService.subscribe((msg) => {
       if (msg.type === 'ELEMENTS_UPDATE' && Array.isArray(msg.payload?.elements)) {
         const remoteElements: CanvasElement[] = msg.payload.elements;
+
+        // Clear preview for this sender since final elements arrived
+        setRemotePreviews((prev) => {
+          if (!prev[msg.senderId]) return prev;
+          const next = { ...prev };
+          delete next[msg.senderId];
+          return next;
+        });
+
         setBoards((prevBoards) => {
-          return prevBoards.map((b) => {
-            if (b.id === activeBoardId) {
+          const targetIndex = prevBoards.findIndex((b) => b.id === activeBoardId);
+          const idxToUpdate = targetIndex >= 0 ? targetIndex : 0;
+          if (prevBoards.length === 0) {
+            const newBoard: Board = {
+              id: activeBoardId || 'board1',
+              name: 'board1',
+              elements: remoteElements,
+              bgColor: '#fdfbf7',
+              gridType: 'dots',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+            StorageService.saveBoard(newBoard);
+            return [newBoard];
+          }
+          return prevBoards.map((b, idx) => {
+            if (idx === idxToUpdate) {
               const updatedBoard = { ...b, elements: remoteElements, updatedAt: Date.now() };
               StorageService.saveBoard(updatedBoard);
               return updatedBoard;
@@ -87,14 +112,40 @@ export function App() {
             return b;
           });
         });
+      } else if (msg.type === 'LIVE_DRAW_PREVIEW') {
+        if (msg.payload?.element) {
+          setRemotePreviews((prev) => ({ ...prev, [msg.senderId]: msg.payload.element }));
+        } else {
+          setRemotePreviews((prev) => {
+            if (!prev[msg.senderId]) return prev;
+            const next = { ...prev };
+            delete next[msg.senderId];
+            return next;
+          });
+        }
       } else if (msg.type === 'SYNC_STATE') {
         const remoteElements = msg.payload?.elements;
         const remoteBg = msg.payload?.bgColor;
         const remoteGrid = msg.payload?.gridType;
 
         setBoards((prevBoards) => {
-          return prevBoards.map((b) => {
-            if (b.id === activeBoardId) {
+          const targetIndex = prevBoards.findIndex((b) => b.id === activeBoardId);
+          const idxToUpdate = targetIndex >= 0 ? targetIndex : 0;
+          if (prevBoards.length === 0) {
+            const newBoard: Board = {
+              id: activeBoardId || 'board1',
+              name: 'board1',
+              elements: (Array.isArray(remoteElements) && remoteElements.length > 0) ? remoteElements : [],
+              bgColor: remoteBg || '#fdfbf7',
+              gridType: remoteGrid || 'dots',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+            StorageService.saveBoard(newBoard);
+            return [newBoard];
+          }
+          return prevBoards.map((b, idx) => {
+            if (idx === idxToUpdate) {
               const updatedBoard = {
                 ...b,
                 elements: (Array.isArray(remoteElements) && remoteElements.length > 0) ? remoteElements : b.elements,
@@ -109,9 +160,12 @@ export function App() {
           });
         });
       } else if (msg.type === 'CLEAR_CANVAS') {
+        setRemotePreviews({});
         setBoards((prevBoards) => {
-          return prevBoards.map((b) => {
-            if (b.id === activeBoardId) {
+          const targetIndex = prevBoards.findIndex((b) => b.id === activeBoardId);
+          const idxToUpdate = targetIndex >= 0 ? targetIndex : 0;
+          return prevBoards.map((b, idx) => {
+            if (idx === idxToUpdate) {
               const updatedBoard = { ...b, elements: [], updatedAt: Date.now() };
               StorageService.saveBoard(updatedBoard);
               return updatedBoard;
@@ -121,8 +175,10 @@ export function App() {
         });
       } else if (msg.type === 'CHANGE_BG_COLOR' && msg.payload?.bgColor) {
         setBoards((prevBoards) => {
-          return prevBoards.map((b) => {
-            if (b.id === activeBoardId) {
+          const targetIndex = prevBoards.findIndex((b) => b.id === activeBoardId);
+          const idxToUpdate = targetIndex >= 0 ? targetIndex : 0;
+          return prevBoards.map((b, idx) => {
+            if (idx === idxToUpdate) {
               const updatedBoard = { ...b, bgColor: msg.payload.bgColor, updatedAt: Date.now() };
               StorageService.saveBoard(updatedBoard);
               return updatedBoard;
@@ -132,8 +188,10 @@ export function App() {
         });
       } else if (msg.type === 'CHANGE_GRID_TYPE' && msg.payload?.gridType) {
         setBoards((prevBoards) => {
-          return prevBoards.map((b) => {
-            if (b.id === activeBoardId) {
+          const targetIndex = prevBoards.findIndex((b) => b.id === activeBoardId);
+          const idxToUpdate = targetIndex >= 0 ? targetIndex : 0;
+          return prevBoards.map((b, idx) => {
+            if (idx === idxToUpdate) {
               const updatedBoard = { ...b, gridType: msg.payload.gridType, updatedAt: Date.now() };
               StorageService.saveBoard(updatedBoard);
               return updatedBoard;
@@ -142,8 +200,8 @@ export function App() {
           });
         });
       } else if (msg.type === 'JOIN_ROOM') {
-        const current = StorageService.getBoards().find((b) => b.id === activeBoardId);
-        if (current) {
+        const current = StorageService.getBoards().find((b) => b.id === activeBoardId) || StorageService.getBoards()[0];
+        if (current && Array.isArray(current.elements) && current.elements.length > 0) {
           collabService.broadcastElements(current.elements);
         }
       }
@@ -626,7 +684,9 @@ export function App() {
           gridType={activeBoard.gridType}
           isBoardLocked={isBoardLocked}
           collaborators={collaborators}
+          remotePreviews={remotePreviews}
           onMouseMoveCursor={(point) => collabService.broadcastCursor(point)}
+          onLiveDrawPreview={(el) => collabService.broadcastLivePreview(el)}
           onInsertImage={handleInsertImage}
           onToolComplete={() => {
             if (activeTool !== 'select' && activeTool !== 'hand') {

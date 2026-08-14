@@ -147,6 +147,18 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Live in-progress drawing preview (smooth stroke/shape streaming while dragging)
+  socket.on('live-draw-preview', ({ roomId, element, user }) => {
+    if (!roomId) return;
+    socket.to(roomId).emit('live-draw-preview', {
+      roomId,
+      element,
+      userId: user?.id || currentUser?.id,
+      userName: user?.name || currentUser?.name,
+      userColor: user?.color || currentUser?.color,
+    });
+  });
+
   // 3. High-Frequency Live Cursor Movement (60fps stream)
   socket.on('cursor-move', ({ roomId, point, user }) => {
     if (!roomId || !point) return;
