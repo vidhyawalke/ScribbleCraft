@@ -83,6 +83,8 @@ export type CollabMessageType =
   | 'CHANGE_BG_COLOR'
   | 'CHANGE_GRID_TYPE';
 
+export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected';
+
 export interface CollabMessage {
   type: CollabMessageType;
   senderId: string;
@@ -92,3 +94,4 @@ export interface CollabMessage {
   payload: any;
   timestamp: number;
 }
+

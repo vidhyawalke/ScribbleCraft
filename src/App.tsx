@@ -12,7 +12,7 @@ import {
   Check,
   Edit3
 } from 'lucide-react';
-import { Board, CanvasElement, ToolType, Point, Collaborator } from './types';
+import { Board, CanvasElement, ToolType, Point, Collaborator, ConnectionStatus } from './types';
 import { StorageService } from './services/storageService';
 import { CollaborationService } from './services/collaborationService';
 import { Toolbar } from './components/Toolbar';
@@ -26,6 +26,14 @@ export function App() {
   const collabService = CollaborationService.getInstance();
   const [localUser, setLocalUser] = useState<Collaborator>(collabService.localUser);
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(collabService.connectionStatus);
+  const [transportType, setTransportType] = useState<string>(
+    collabService.activeTransport === 'socket.io'
+      ? 'Socket.io'
+      : collabService.activeTransport === 'webrtc'
+      ? 'P2P WebRTC'
+      : ''
+  );
   const [isEditingName, setIsEditingName] = useState<boolean>(false);
   const [nameInput, setNameInput] = useState<string>(collabService.localUser.name);
   const [copiedToast, setCopiedToast] = useState<boolean>(false);
@@ -49,7 +57,18 @@ export function App() {
 
   // Initialize Room & Real-time Syncing
   useEffect(() => {
-    collabService.initRoom();
+    const currentBoard = StorageService.getBoards().find((b) => b.id === activeBoardId);
+    collabService.initRoom(
+      undefined,
+      currentBoard?.elements,
+      currentBoard?.bgColor,
+      currentBoard?.gridType
+    );
+
+    const unsubStatus = collabService.onConnectionStatusChange((status, transport) => {
+      setConnectionStatus(status);
+      if (transport) setTransportType(transport);
+    });
 
     const unsubCollab = collabService.onCollaboratorsChange((list) => {
       setCollaborators(list);
@@ -68,11 +87,54 @@ export function App() {
             return b;
           });
         });
+      } else if (msg.type === 'SYNC_STATE') {
+        const remoteElements = msg.payload?.elements;
+        const remoteBg = msg.payload?.bgColor;
+        const remoteGrid = msg.payload?.gridType;
+
+        setBoards((prevBoards) => {
+          return prevBoards.map((b) => {
+            if (b.id === activeBoardId) {
+              const updatedBoard = {
+                ...b,
+                elements: (Array.isArray(remoteElements) && remoteElements.length > 0) ? remoteElements : b.elements,
+                bgColor: remoteBg || b.bgColor,
+                gridType: remoteGrid || b.gridType,
+                updatedAt: Date.now(),
+              };
+              StorageService.saveBoard(updatedBoard);
+              return updatedBoard;
+            }
+            return b;
+          });
+        });
       } else if (msg.type === 'CLEAR_CANVAS') {
         setBoards((prevBoards) => {
           return prevBoards.map((b) => {
             if (b.id === activeBoardId) {
               const updatedBoard = { ...b, elements: [], updatedAt: Date.now() };
+              StorageService.saveBoard(updatedBoard);
+              return updatedBoard;
+            }
+            return b;
+          });
+        });
+      } else if (msg.type === 'CHANGE_BG_COLOR' && msg.payload?.bgColor) {
+        setBoards((prevBoards) => {
+          return prevBoards.map((b) => {
+            if (b.id === activeBoardId) {
+              const updatedBoard = { ...b, bgColor: msg.payload.bgColor, updatedAt: Date.now() };
+              StorageService.saveBoard(updatedBoard);
+              return updatedBoard;
+            }
+            return b;
+          });
+        });
+      } else if (msg.type === 'CHANGE_GRID_TYPE' && msg.payload?.gridType) {
+        setBoards((prevBoards) => {
+          return prevBoards.map((b) => {
+            if (b.id === activeBoardId) {
+              const updatedBoard = { ...b, gridType: msg.payload.gridType, updatedAt: Date.now() };
               StorageService.saveBoard(updatedBoard);
               return updatedBoard;
             }
@@ -88,6 +150,7 @@ export function App() {
     });
 
     return () => {
+      unsubStatus();
       unsubCollab();
       unsubMsg();
     };
@@ -505,6 +568,27 @@ export function App() {
                 <Edit3 size={11} color="#9ca3af" />
               </span>
             )}
+          </div>
+
+          {/* Real-time Room Status Indicator */}
+          <div
+            className={`status-pill ${connectionStatus}`}
+            title={`Real-Time Room Engine: ${
+              connectionStatus === 'connected'
+                ? `Active via ${transportType || 'Cloud Sync'}`
+                : connectionStatus === 'connecting'
+                ? 'Connecting to room peers...'
+                : 'Offline (Local mode)'
+            }`}
+          >
+            <div className={`status-dot ${connectionStatus}`} />
+            <span>
+              {connectionStatus === 'connected'
+                ? `Live (${transportType || 'Room'})`
+                : connectionStatus === 'connecting'
+                ? 'Connecting...'
+                : 'Offline'}
+            </span>
           </div>
 
           {/* Active Collaborators Counter */}
