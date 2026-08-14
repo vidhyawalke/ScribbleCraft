@@ -52,14 +52,6 @@ export interface Board {
   gridType: 'dots' | 'lines' | 'none';
 }
 
-export interface UserProfile {
-  id: string;
-  name: string;
-  email: string;
-  avatar: string;
-  provider: 'google' | 'github';
-  token: string;
-}
 
 export interface GoogleFont {
   family: string;

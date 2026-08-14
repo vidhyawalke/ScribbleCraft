@@ -195,7 +195,26 @@ export class StorageService {
       const raw = localStorage.getItem(this.getKey(userId));
       if (raw) {
         const boards: Board[] = JSON.parse(raw);
-        if (boards.length > 0) return boards;
+        if (boards.length > 0) {
+          // Sanitize any legacy cached text from earlier versions
+          const sanitized = boards.map((b) => ({
+            ...b,
+            elements: b.elements.map((el) => {
+              if (el.text && (el.text.includes('OAuth') || el.text.includes('Excalidraw'))) {
+                return {
+                  ...el,
+                  text: el.text
+                    .replace(/Sign in with OAuth 2\.0 to sync your workspace!/g, 'Share room link with friends to collaborate live!')
+                    .replace(/OAuth 2\.0 multi-board saving/g, 'Live Real-Time Collaboration')
+                    .replace(/OAuth 2\.0 Auth Flow 🔑[\s\S]*persistent state/g, 'Live Collaboration 👥\n- Real-time WebRTC sync\n- Remote collaborator cursors\n- Shareable room links')
+                    .replace(/Excalidraw/g, 'ScribbleCraft')
+                };
+              }
+              return el;
+            })
+          }));
+          return sanitized;
+        }
       }
     } catch (e) {
       console.error('Failed to load boards:', e);
