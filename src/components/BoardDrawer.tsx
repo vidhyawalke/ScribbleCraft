@@ -321,6 +321,18 @@ export const BoardDrawer: React.FC<BoardDrawerProps> = ({
               />
             </label>
           </div>
+
+          <div style={{ textAlign: 'center', marginTop: '20px', paddingTop: '14px', borderTop: '1px solid #f3f4f6', fontSize: '0.8rem', color: '#6b7280' }}>
+            Crafted with ❤️ by{' '}
+            <a
+              href="https://www.linkedin.com/in/vidhyawalke/"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: '#0077b5', fontWeight: 600, textDecoration: 'none' }}
+            >
+              Vidhya Walke ↗
+            </a>
+          </div>
         </div>
       </div>
     </div>

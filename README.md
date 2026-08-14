@@ -149,3 +149,12 @@ Follow these steps to run ScribbleCraft on your local machine:
 2. Import the repository in [Vercel](https://vercel.com).
 3. Framework Preset: **Vite**.
 4. Click **Deploy**. (The included `vercel.json` handles all room routing automatically).
+
+---
+
+## 👩🏽‍💻 Author
+
+**Vidhya Walke**
+- **LinkedIn**: [linkedin.com/in/vidhyawalke](https://www.linkedin.com/in/vidhyawalke/)
+- **GitHub**: [@vidhyawalke](https://github.com/vidhyawalke)
+
