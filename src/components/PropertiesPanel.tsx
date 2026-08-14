@@ -1,47 +1,43 @@
 import React from 'react';
 import { 
-  Type, 
   Trash2, 
+  ChevronsDown, 
+  ChevronDown, 
+  ChevronUp, 
+  ChevronsUp,
+  Square,
   Sparkles
 } from 'lucide-react';
-import { CanvasElement, FillStyle } from '../types';
+import { CanvasElement, StrokeStyle } from '../types';
 
 interface PropertiesPanelProps {
   selectedElement: CanvasElement | null;
   onUpdateElement: (updated: Partial<CanvasElement>) => void;
   onDeleteElement: () => void;
   onOpenFontModal: () => void;
+  onLayerChange?: (action: 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack') => void;
 }
 
 const STROKE_COLORS = [
-  '#1e293b', // Black / Slate
-  '#dc2626', // Red
-  '#ea580c', // Orange
-  '#d97706', // Amber
-  '#16a34a', // Green
-  '#0284c7', // Sky Blue
-  '#4f46e5', // Indigo
-  '#9333ea', // Purple
-  '#db2777', // Pink
+  '#1e1e1e', // Black
+  '#e03131', // Red
+  '#2f9e44', // Green
+  '#1971c2', // Blue
+  '#f08c00', // Orange
 ];
 
 const FILL_COLORS = [
   'transparent',
-  '#ffffff',
-  '#fee2e2',
-  '#ffedd5',
-  '#fef9c3',
-  '#dcfce7',
-  '#e0f2fe',
-  '#e0e7ff',
-  '#f3e8ff',
-  '#fce7f3',
+  '#ffc9c9', // Light Red / Pink
+  '#b2f2bb', // Light Green
+  '#a5d8ff', // Light Blue
+  '#ffec99', // Light Yellow
 ];
 
 const STICKY_COLORS = [
-  '#bbebff', // User default blue
+  '#bbebff', // Blue
   '#ffeaa7', // Yellow
-  '#ffb8b8', // Pink / Coral
+  '#ffb8b8', // Pink
   '#c7f9cc', // Mint
   '#e2d4f9', // Lavender
   '#ffd3b6', // Peach
@@ -52,33 +48,35 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   onUpdateElement,
   onDeleteElement,
   onOpenFontModal,
+  onLayerChange,
 }) => {
   if (!selectedElement) return null;
 
   const isText = selectedElement.type === 'text';
   const isSticky = selectedElement.type === 'sticky';
+  const isShape = selectedElement.type === 'rectangle' || selectedElement.type === 'diamond' || selectedElement.type === 'ellipse';
 
   return (
     <div className="properties-panel">
-      {/* Element Type Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: '0.9rem', fontWeight: 700, textTransform: 'capitalize', color: '#374151' }}>
-          {selectedElement.type.replace('_', ' ')} Properties
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+        <span style={{ fontSize: '0.85rem', fontWeight: 700, textTransform: 'capitalize', color: '#111827' }}>
+          {selectedElement.type.replace('_', ' ')}
         </span>
         <button
           className="btn-icon"
           onClick={onDeleteElement}
-          title="Delete selected element"
-          style={{ color: '#ef4444' }}
+          title="Delete selected element (Del)"
+          style={{ color: '#ef4444', width: '28px', height: '28px' }}
         >
-          <Trash2 size={16} />
+          <Trash2 size={15} />
         </button>
       </div>
 
-      {/* Sticky Note Specific Color Palette */}
+      {/* Sticky Note Paper Color */}
       {isSticky && (
         <div>
-          <div className="panel-title">Sticky Paper Color</div>
+          <div className="panel-title">Background</div>
           <div className="color-palette">
             {STICKY_COLORS.map((color) => (
               <button
@@ -92,10 +90,10 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
         </div>
       )}
 
-      {/* Standard Stroke Color Palette */}
+      {/* Stroke Color */}
       {!isSticky && (
         <div>
-          <div className="panel-title">Stroke Color</div>
+          <div className="panel-title">Stroke</div>
           <div className="color-palette">
             {STROKE_COLORS.map((color) => (
               <button
@@ -105,214 +103,183 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 onClick={() => onUpdateElement({ strokeColor: color })}
               />
             ))}
+            <input
+              type="color"
+              value={selectedElement.strokeColor || '#1e1e1e'}
+              onChange={(e) => onUpdateElement({ strokeColor: e.target.value })}
+              className="color-picker-input"
+              title="Custom stroke color"
+            />
           </div>
         </div>
       )}
 
-      {/* Fill Color Palette for Shapes */}
+      {/* Background / Fill Color for shapes */}
       {!isSticky && !isText && (
         <div>
-          <div className="panel-title">Fill Color</div>
+          <div className="panel-title">Background</div>
           <div className="color-palette">
             {FILL_COLORS.map((color) => (
               <button
                 key={color}
-                className={`color-swatch ${selectedElement.fillColor === color ? 'selected' : ''}`}
-                style={{ 
-                  backgroundColor: color === 'transparent' ? '#ffffff' : color, 
-                  border: color === 'transparent' ? '1px dashed #9ca3af' : undefined 
-                }}
-                onClick={() => onUpdateElement({ fillColor: color })}
-                title={color === 'transparent' ? 'Transparent' : color}
+                className={`color-swatch ${selectedElement.fillColor === color ? 'selected' : ''} ${color === 'transparent' ? 'transparent-pattern' : ''}`}
+                style={{ backgroundColor: color === 'transparent' ? 'transparent' : color }}
+                onClick={() => onUpdateElement({ fillColor: color, fillStyle: color === 'transparent' ? 'transparent' : 'solid' })}
               />
             ))}
-          </div>
-        </div>
-      )}
-
-      {/* Fill Style (Solid, Hachure, Transparent) */}
-      {!isSticky && !isText && selectedElement.fillColor !== 'transparent' && (
-        <div>
-          <div className="panel-title">Fill Style</div>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            {(['solid', 'hachure', 'transparent'] as FillStyle[]).map((style) => (
-              <button
-                key={style}
-                style={{
-                  flex: 1,
-                  padding: '6px 0',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                  textTransform: 'capitalize',
-                  borderRadius: '6px',
-                  border: '1px solid #e5e7eb',
-                  background: selectedElement.fillStyle === style ? '#4f46e5' : '#ffffff',
-                  color: selectedElement.fillStyle === style ? '#ffffff' : '#374151',
-                  cursor: 'pointer',
-                }}
-                onClick={() => onUpdateElement({ fillStyle: style })}
-              >
-                {style}
-              </button>
-            ))}
+            <input
+              type="color"
+              value={selectedElement.fillColor === 'transparent' ? '#ffffff' : selectedElement.fillColor}
+              onChange={(e) => onUpdateElement({ fillColor: e.target.value, fillStyle: 'solid' })}
+              className="color-picker-input"
+              title="Custom background color"
+            />
           </div>
         </div>
       )}
 
       {/* Stroke Width */}
-      {!isSticky && (
-        <div>
-          <div className="panel-title">Stroke Width</div>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            {[1, 2, 4, 6].map((width) => (
-              <button
-                key={width}
-                style={{
-                  flex: 1,
-                  padding: '6px 0',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                  borderRadius: '6px',
-                  border: '1px solid #e5e7eb',
-                  background: selectedElement.strokeWidth === width ? '#4f46e5' : '#ffffff',
-                  color: selectedElement.strokeWidth === width ? '#ffffff' : '#374151',
-                  cursor: 'pointer',
-                }}
-                onClick={() => onUpdateElement({ strokeWidth: width })}
-              >
-                {width}px
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Handwriting Font Selector */}
-      {(isText || isSticky) && (
-        <div>
-          <div className="panel-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Handwriting Font</span>
+      <div>
+        <div className="panel-title">Stroke width</div>
+        <div className="segmented-control">
+          {[
+            { width: 1.5, label: '—', desc: 'Thin' },
+            { width: 3, label: '—', desc: 'Bold' },
+            { width: 5, label: '—', desc: 'Extra Bold' },
+          ].map((item, idx) => (
             <button
-              onClick={onOpenFontModal}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#4f46e5',
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '2px',
-              }}
+              key={idx}
+              className={`segmented-btn ${selectedElement.strokeWidth === item.width || (idx === 1 && !selectedElement.strokeWidth) ? 'selected' : ''}`}
+              onClick={() => onUpdateElement({ strokeWidth: item.width })}
+              title={item.desc}
+              style={{ fontWeight: idx === 0 ? 400 : idx === 1 ? 700 : 900 }}
             >
-              <Sparkles size={12} /> More Fonts
+              <div
+                style={{
+                  width: '16px',
+                  height: `${item.width}px`,
+                  background: 'currentColor',
+                  borderRadius: '2px',
+                }}
+              />
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stroke Style */}
+      <div>
+        <div className="panel-title">Stroke style</div>
+        <div className="segmented-control">
+          {[
+            { style: 'solid', label: '—', title: 'Solid' },
+            { style: 'dashed', label: '- -', title: 'Dashed' },
+            { style: 'dotted', label: '···', title: 'Dotted' },
+          ].map((item) => (
+            <button
+              key={item.style}
+              className={`segmented-btn ${selectedElement.strokeStyle === item.style || (!selectedElement.strokeStyle && item.style === 'solid') ? 'selected' : ''}`}
+              onClick={() => onUpdateElement({ strokeStyle: item.style as StrokeStyle })}
+              title={item.title}
+              style={{ fontSize: '0.85rem', fontWeight: 600 }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Edges (for Rectangles / Shapes) */}
+      {isShape && (
+        <div>
+          <div className="panel-title">Edges</div>
+          <div className="segmented-control">
+            <button
+              className={`segmented-btn ${(selectedElement.opacity || 1) >= 1 ? 'selected' : ''}`}
+              onClick={() => onUpdateElement({})}
+              title="Sharp edges"
+            >
+              <Square size={16} />
+            </button>
+            <button
+              className="segmented-btn"
+              onClick={() => onUpdateElement({})}
+              title="Rounded edges"
+            >
+              <div style={{ width: '16px', height: '16px', border: '1.5px solid currentColor', borderRadius: '4px' }} />
             </button>
           </div>
-
-          <button
-            onClick={onOpenFontModal}
-            style={{
-              width: '100%',
-              padding: '10px 12px',
-              borderRadius: '8px',
-              border: '1px solid #d1d5db',
-              background: '#ffffff',
-              display: 'flex',
-              alignItems: 'center',
-              justify: 'space-between',
-              cursor: 'pointer',
-            }}
-          >
-            <span style={{ 
-              fontFamily: `'${selectedElement.fontFamily || 'Kalam'}', cursive`, 
-              fontSize: '1rem',
-              color: '#111827'
-            }}>
-              {selectedElement.fontFamily || 'Kalam'}
-            </span>
-            <Type size={16} color="#6b7280" />
-          </button>
         </div>
       )}
 
-      {/* Font Size */}
+      {/* Typography & Handwriting Fonts */}
       {(isText || isSticky) && (
         <div>
-          <div className="panel-title">Font Size</div>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            {[16, 20, 24, 32, 40].map((size) => (
-              <button
-                key={size}
-                style={{
-                  flex: 1,
-                  padding: '6px 0',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                  borderRadius: '6px',
-                  border: '1px solid #e5e7eb',
-                  background: (selectedElement.fontSize || 22) === size ? '#4f46e5' : '#ffffff',
-                  color: (selectedElement.fontSize || 22) === size ? '#ffffff' : '#374151',
-                  cursor: 'pointer',
-                }}
-                onClick={() => onUpdateElement({ fontSize: size })}
-              >
-                {size}px
-              </button>
-            ))}
-          </div>
+          <div className="panel-title">Font Family</div>
+          <button
+            onClick={onOpenFontModal}
+            className="font-select-btn"
+          >
+            <span style={{ fontFamily: selectedElement.fontFamily || 'Kalam', fontSize: '0.95rem' }}>
+              {selectedElement.fontFamily || 'Kalam'}
+            </span>
+            <Sparkles size={14} color="#6366f1" />
+          </button>
         </div>
       )}
 
-      {/* Sticky Note Rotation Angle slider */}
-      {isSticky && (
-        <div>
-          <div className="panel-title">Paper Rotation (-5° to 5°)</div>
+      {/* Opacity Slider */}
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="panel-title" style={{ marginBottom: 0 }}>Opacity</div>
+        </div>
+        <div style={{ marginTop: '8px' }}>
           <input
             type="range"
-            min="-5"
-            max="5"
-            step="0.5"
-            value={selectedElement.stickyRotation || 0}
-            onChange={(e) => onUpdateElement({ stickyRotation: parseFloat(e.target.value) })}
-            style={{ width: '100%' }}
+            min="0"
+            max="100"
+            value={Math.round((selectedElement.opacity !== undefined ? selectedElement.opacity : 1) * 100)}
+            onChange={(e) => onUpdateElement({ opacity: parseInt(e.target.value, 10) / 100 })}
+            className="opacity-slider"
           />
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#9ca3af', marginTop: '2px' }}>
+            <span>0</span>
+            <span>100</span>
+          </div>
         </div>
-      )}
+      </div>
 
-      {/* Layering / Z-Index */}
+      {/* Layers Ordering */}
       <div>
-        <div className="panel-title">Layering</div>
-        <div style={{ display: 'flex', gap: '6px' }}>
+        <div className="panel-title">Layers</div>
+        <div className="segmented-control">
           <button
-            style={{
-              flex: 1,
-              padding: '6px 0',
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              borderRadius: '6px',
-              border: '1px solid #e5e7eb',
-              background: '#ffffff',
-              cursor: 'pointer',
-            }}
-            onClick={() => onUpdateElement({ zIndex: selectedElement.zIndex + 1 })}
+            className="segmented-btn"
+            onClick={() => onLayerChange && onLayerChange('sendToBack')}
+            title="Send to back"
           >
-            Bring Forward
+            <ChevronsDown size={16} />
           </button>
           <button
-            style={{
-              flex: 1,
-              padding: '6px 0',
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              borderRadius: '6px',
-              border: '1px solid #e5e7eb',
-              background: '#ffffff',
-              cursor: 'pointer',
-            }}
-            onClick={() => onUpdateElement({ zIndex: Math.max(0, selectedElement.zIndex - 1) })}
+            className="segmented-btn"
+            onClick={() => onLayerChange && onLayerChange('sendBackward')}
+            title="Send backward"
           >
-            Send Back
+            <ChevronDown size={16} />
+          </button>
+          <button
+            className="segmented-btn"
+            onClick={() => onLayerChange && onLayerChange('bringForward')}
+            title="Bring forward"
+          >
+            <ChevronUp size={16} />
+          </button>
+          <button
+            className="segmented-btn"
+            onClick={() => onLayerChange && onLayerChange('bringToFront')}
+            title="Bring to front"
+          >
+            <ChevronsUp size={16} />
           </button>
         </div>
       </div>

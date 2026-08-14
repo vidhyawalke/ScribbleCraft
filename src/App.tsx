@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
+  Menu,
   FolderKanban, 
   ZoomIn, 
   ZoomOut, 
@@ -32,6 +33,7 @@ export function App() {
   const [boards, setBoards] = useState<Board[]>(() => StorageService.getBoards());
   const [activeBoardId, setActiveBoardId] = useState<string>(() => StorageService.getActiveBoardId());
   const [activeTool, setActiveTool] = useState<ToolType>('select');
+  const [isToolLocked, setIsToolLocked] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [zoom, setZoom] = useState<number>(1.0);
@@ -78,7 +80,6 @@ export function App() {
           });
         });
       } else if (msg.type === 'JOIN_ROOM') {
-        // Send our current board elements to new peers
         const current = StorageService.getBoards().find((b) => b.id === activeBoardId);
         if (current) {
           collabService.broadcastElements(current.elements);
@@ -103,46 +104,57 @@ export function App() {
   };
 
   // Push state to undo/redo history and broadcast to room
-  const updateElements = (newElements: CanvasElement[], isRemote: boolean = false) => {
-    const updatedBoard = { ...activeBoard, elements: newElements, updatedAt: Date.now() };
-    StorageService.saveBoard(updatedBoard);
-    
-    setBoards(boards.map((b) => (b.id === activeBoard.id ? updatedBoard : b)));
+  const updateElements = useCallback((newElements: CanvasElement[], isRemote: boolean = false) => {
+    setBoards((prev) => {
+      const current = prev.find((b) => b.id === activeBoardId) || prev[0];
+      if (!current) return prev;
+      const updatedBoard = { ...current, elements: newElements, updatedAt: Date.now() };
+      StorageService.saveBoard(updatedBoard);
+      return prev.map((b) => (b.id === current.id ? updatedBoard : b));
+    });
 
     // Save to history
-    const nextHistory = history.slice(0, historyIndex + 1);
-    setHistory([...nextHistory, newElements]);
-    setHistoryIndex(nextHistory.length);
+    setHistory((prevHistory) => {
+      const nextHistory = prevHistory.slice(0, historyIndex + 1);
+      return [...nextHistory, newElements];
+    });
+    setHistoryIndex((prevIndex) => prevIndex + 1);
 
     // Broadcast to connected room collaborators
     if (!isRemote) {
       collabService.broadcastElements(newElements);
     }
-  };
+  }, [activeBoardId, historyIndex, collabService]);
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
       const prevElements = history[historyIndex - 1];
-      setHistoryIndex(historyIndex - 1);
-      updateElements(prevElements);
+      setHistoryIndex((prev) => prev - 1);
+      setBoards((prev) => {
+        const current = prev.find((b) => b.id === activeBoardId) || prev[0];
+        if (!current) return prev;
+        const updatedBoard = { ...current, elements: prevElements, updatedAt: Date.now() };
+        StorageService.saveBoard(updatedBoard);
+        return prev.map((b) => (b.id === current.id ? updatedBoard : b));
+      });
+      collabService.broadcastElements(prevElements);
     }
-  };
+  }, [history, historyIndex, activeBoardId, collabService]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (historyIndex < history.length - 1) {
       const nextElements = history[historyIndex + 1];
-      setHistoryIndex(historyIndex + 1);
-      updateElements(nextElements);
+      setHistoryIndex((prev) => prev + 1);
+      setBoards((prev) => {
+        const current = prev.find((b) => b.id === activeBoardId) || prev[0];
+        if (!current) return prev;
+        const updatedBoard = { ...current, elements: nextElements, updatedAt: Date.now() };
+        StorageService.saveBoard(updatedBoard);
+        return prev.map((b) => (b.id === current.id ? updatedBoard : b));
+      });
+      collabService.broadcastElements(nextElements);
     }
-  };
-
-  const handleClearCanvas = () => {
-    if (window.confirm('Clear all elements on this board?')) {
-      updateElements([]);
-      setSelectedId(null);
-      collabService.broadcastClearCanvas();
-    }
-  };
+  }, [history, historyIndex, activeBoardId, collabService]);
 
   const selectedElement = activeBoard.elements.find((el) => el.id === selectedId) || null;
 
@@ -157,11 +169,159 @@ export function App() {
     updateElements(newElements);
   };
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = useCallback(() => {
     if (!selectedId) return;
     updateElements(activeBoard.elements.filter((el) => el.id !== selectedId));
     setSelectedId(null);
+  }, [selectedId, activeBoard.elements, updateElements]);
+
+  // Layer ordering actions
+  const handleLayerChange = (action: 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack') => {
+    if (!selectedId) return;
+    const index = activeBoard.elements.findIndex((el) => el.id === selectedId);
+    if (index === -1) return;
+
+    const list = [...activeBoard.elements];
+    const [item] = list.splice(index, 1);
+
+    if (action === 'bringToFront') {
+      list.push(item);
+    } else if (action === 'sendToBack') {
+      list.unshift(item);
+    } else if (action === 'bringForward') {
+      const targetIndex = Math.min(list.length, index + 1);
+      list.splice(targetIndex, 0, item);
+    } else if (action === 'sendBackward') {
+      const targetIndex = Math.max(0, index - 1);
+      list.splice(targetIndex, 0, item);
+    }
+
+    const reindexed = list.map((el, i) => ({ ...el, zIndex: i + 1 }));
+    updateElements(reindexed);
   };
+
+  // Full Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is currently typing in an input or textarea
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      // Undo / Redo
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      // Delete selected element
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        handleDeleteSelected();
+        return;
+      }
+
+      // Zoom Controls
+      if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        setZoom((z) => Math.min(4.0, z + 0.1));
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_')) {
+        e.preventDefault();
+        setZoom((z) => Math.max(0.2, z - 0.1));
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+        e.preventDefault();
+        setZoom(1.0);
+        setPanOffset({ x: 0, y: 0 });
+        return;
+      }
+
+      // Deselect or switch to selection tool on Escape
+      if (e.key === 'Escape') {
+        setSelectedId(null);
+        setActiveTool('select');
+        return;
+      }
+
+      // Tool selection shortcuts
+      switch (e.key) {
+        case '1':
+        case 'v':
+        case 'V':
+          setActiveTool('select');
+          break;
+        case '2':
+        case 'r':
+        case 'R':
+          setActiveTool('rectangle');
+          break;
+        case '3':
+        case 'd':
+        case 'D':
+          setActiveTool('diamond');
+          break;
+        case '4':
+        case 'o':
+        case 'O':
+          setActiveTool('ellipse');
+          break;
+        case '5':
+        case 'a':
+        case 'A':
+          setActiveTool('arrow');
+          break;
+        case '6':
+        case 'l':
+        case 'L':
+          setActiveTool('line');
+          break;
+        case '7':
+        case 'p':
+        case 'P':
+          setActiveTool('pencil');
+          break;
+        case '8':
+        case 't':
+        case 'T':
+          setActiveTool('text');
+          break;
+        case '9':
+        case 's':
+        case 'S':
+          setActiveTool('sticky');
+          break;
+        case '0':
+        case 'e':
+        case 'E':
+          setActiveTool('eraser');
+          break;
+        case 'h':
+        case 'H':
+          setActiveTool('hand');
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo, handleDeleteSelected]);
 
   const handleShareRoom = () => {
     const shareUrl = collabService.getShareableUrl();
@@ -211,25 +371,7 @@ export function App() {
 
       {/* Toast Notification */}
       {copiedToast && (
-        <div
-          style={{
-            position: 'fixed',
-            top: '70px',
-            right: '24px',
-            zIndex: 10000,
-            background: '#10b981',
-            color: '#ffffff',
-            padding: '10px 18px',
-            borderRadius: '12px',
-            boxShadow: '0 10px 25px rgba(0,0,0,0.15)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            fontWeight: 600,
-            fontSize: '0.9rem',
-            animation: 'fadeIn 0.2s ease-out',
-          }}
-        >
+        <div className="copy-toast">
           <Check size={18} />
           Copied live collaboration room link to clipboard!
         </div>
@@ -237,51 +379,49 @@ export function App() {
 
       {/* Top Header Bar */}
       <header className="top-header">
-        <div className="brand-badge" onClick={() => setIsBoardDrawerOpen(true)} title="Click to manage boards">
-          <img 
-            src="/logo.png" 
-            alt="ScribbleCraft Logo" 
-            style={{ 
-              height: '34px', 
-              width: 'auto', 
-              objectFit: 'contain',
-              filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))',
-              display: 'block' 
-            }} 
-          />
-          <span className="board-tag">{activeBoard.name}</span>
-          <FolderKanban size={16} color="#6366f1" />
+        {/* Left: Menu & Brand Logo */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            className="menu-round-btn"
+            onClick={() => setIsBoardDrawerOpen(true)}
+            title="Workspace Boards Menu"
+          >
+            <Menu size={19} />
+          </button>
+
+          <div className="brand-badge" onClick={() => setIsBoardDrawerOpen(true)} title="Click to manage boards">
+            <img 
+              src="/logo.png" 
+              alt="ScribbleCraft Logo" 
+              style={{ 
+                height: '32px', 
+                width: 'auto', 
+                objectFit: 'contain',
+                filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))',
+                display: 'block' 
+              }} 
+            />
+            <span className="board-tag">{activeBoard.name}</span>
+            <FolderKanban size={15} color="#6366f1" />
+          </div>
         </div>
 
         {/* Center Floating Toolbar */}
         <Toolbar
           activeTool={activeTool}
           setActiveTool={setActiveTool}
-          onClearCanvas={handleClearCanvas}
+          isLocked={isToolLocked}
+          setIsLocked={setIsToolLocked}
         />
 
         {/* Right Live Collaboration Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {/* User Badge / Editable Name */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              background: 'rgba(255, 255, 255, 0.92)',
-              backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(229, 231, 235, 0.9)',
-              borderRadius: '12px',
-              fontSize: '0.85rem',
-              fontWeight: 600,
-              color: '#374151',
-            }}
-          >
+          <div className="user-name-badge">
             <div
               style={{
-                width: '10px',
-                height: '10px',
+                width: '9px',
+                height: '9px',
                 borderRadius: '50%',
                 background: localUser.color || '#6366f1',
               }}
@@ -301,7 +441,7 @@ export function App() {
                   fontWeight: 600,
                   fontSize: '0.85rem',
                   color: '#111827',
-                  width: '110px',
+                  width: '100px',
                 }}
               />
             ) : (
@@ -311,52 +451,26 @@ export function App() {
                 style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
               >
                 {localUser.name}
-                <Edit3 size={12} color="#9ca3af" />
+                <Edit3 size={11} color="#9ca3af" />
               </span>
             )}
           </div>
 
           {/* Active Collaborators Counter */}
           <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '6px 12px',
-              background: 'rgba(243, 244, 246, 0.9)',
-              borderRadius: '12px',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              color: '#4b5563',
-            }}
+            className="online-pill"
             title={`${collaborators.length + 1} users online in room`}
           >
-            <Users size={15} color="#6366f1" />
+            <Users size={14} color="#6366f1" />
             <span>{collaborators.length + 1} Online</span>
           </div>
 
           {/* Share Room Link Button */}
           <button
             onClick={handleShareRoom}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '8px 16px',
-              background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
-              border: 'none',
-              borderRadius: '12px',
-              boxShadow: '0 4px 12px rgba(99, 102, 241, 0.35)',
-              fontWeight: 600,
-              fontSize: '0.85rem',
-              color: '#ffffff',
-              cursor: 'pointer',
-              transition: 'transform 0.15s ease',
-            }}
-            onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.97)'}
-            onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'}
+            className="share-room-btn"
           >
-            <Share2 size={16} />
+            <Share2 size={15} />
             <span>Share Room</span>
           </button>
         </div>
@@ -377,126 +491,82 @@ export function App() {
           gridType={activeBoard.gridType}
           collaborators={collaborators}
           onMouseMoveCursor={(point) => collabService.broadcastCursor(point)}
+          onToolComplete={() => {
+            if (!isToolLocked && activeTool !== 'select' && activeTool !== 'hand') {
+              setActiveTool('select');
+            }
+          }}
         />
       </main>
 
-      {/* Contextual Properties Inspector Panel */}
+      {/* Contextual Properties Inspector Panel (Left side, matching Screenshot 3 & 4) */}
       {selectedElement && (
         <PropertiesPanel
           selectedElement={selectedElement}
           onUpdateElement={handleUpdateSelected}
           onDeleteElement={handleDeleteSelected}
           onOpenFontModal={() => setIsFontModalOpen(true)}
+          onLayerChange={handleLayerChange}
         />
       )}
 
-      {/* Bottom Floating Navigation Controls */}
-      <div className="bottom-controls">
-        <button
-          className="btn-icon"
-          onClick={() => setZoom((z) => Math.max(0.2, z - 0.1))}
-          title="Zoom Out"
-        >
-          <ZoomOut size={16} />
-        </button>
-        <span className="zoom-text">{Math.round(zoom * 100)}%</span>
-        <button
-          className="btn-icon"
-          onClick={() => setZoom((z) => Math.min(4.0, z + 0.1))}
-          title="Zoom In"
-        >
-          <ZoomIn size={16} />
-        </button>
-        <button
-          className="btn-icon"
-          onClick={() => { setZoom(1.0); setPanOffset({ x: 0, y: 0 }); }}
-          title="Reset Zoom & Pan"
-        >
-          Reset
-        </button>
+      {/* Bottom Floating Navigation Controls (Matching Screenshot 4) */}
+      <div className="bottom-left-bar">
+        {/* Zoom Controls Pill */}
+        <div className="bottom-pill">
+          <button
+            className="btn-icon"
+            onClick={() => setZoom((z) => Math.max(0.2, z - 0.1))}
+            title="Zoom Out (Ctrl -)"
+          >
+            <ZoomOut size={15} />
+          </button>
+          <span className="zoom-text">{Math.round(zoom * 100)}%</span>
+          <button
+            className="btn-icon"
+            onClick={() => setZoom((z) => Math.min(4.0, z + 0.1))}
+            title="Zoom In (Ctrl +)"
+          >
+            <ZoomIn size={15} />
+          </button>
+        </div>
 
-        <div className="divider" />
+        {/* Undo / Redo Pill */}
+        <div className="bottom-pill">
+          <button
+            className="btn-icon"
+            onClick={handleUndo}
+            disabled={historyIndex <= 0}
+            title="Undo (Ctrl+Z)"
+          >
+            <RotateCcw size={15} />
+          </button>
+          <button
+            className="btn-icon"
+            onClick={handleRedo}
+            disabled={historyIndex >= history.length - 1}
+            title="Redo (Ctrl+Y)"
+          >
+            <RotateCw size={15} />
+          </button>
+        </div>
 
-        <button
-          className="btn-icon"
-          onClick={handleUndo}
-          disabled={historyIndex <= 0}
-          title="Undo"
-        >
-          <RotateCcw size={16} />
-        </button>
-        <button
-          className="btn-icon"
-          onClick={handleRedo}
-          disabled={historyIndex >= history.length - 1}
-          title="Redo"
-        >
-          <RotateCw size={16} />
-        </button>
-
-        <div className="divider" />
-
-        <button
-          className="btn-icon"
-          onClick={() => {
-            const nextGrid = activeBoard.gridType === 'dots' ? 'lines' : activeBoard.gridType === 'lines' ? 'none' : 'dots';
-            const updated = { ...activeBoard, gridType: nextGrid };
-            StorageService.saveBoard(updated);
-            setBoards(boards.map((b) => (b.id === activeBoard.id ? updated : b)));
-          }}
-          title="Toggle Grid (Dots/Lines/None)"
-        >
-          <Grid size={16} />
-        </button>
+        {/* Grid Toggle Pill */}
+        <div className="bottom-pill">
+          <button
+            className="btn-icon"
+            onClick={() => {
+              const nextGrid = activeBoard.gridType === 'dots' ? 'lines' : activeBoard.gridType === 'lines' ? 'none' : 'dots';
+              const updated = { ...activeBoard, gridType: nextGrid };
+              StorageService.saveBoard(updated);
+              setBoards(boards.map((b) => (b.id === activeBoard.id ? updated : b)));
+            }}
+            title="Toggle Grid (Dots/Lines/None)"
+          >
+            <Grid size={15} />
+          </button>
+        </div>
       </div>
-
-      {/* Floating Developer Credit Badge */}
-      <a
-        href="https://www.linkedin.com/in/vidhyawalke/"
-        target="_blank"
-        rel="noopener noreferrer"
-        title="Connect with Vidhya Walke on LinkedIn"
-        style={{
-          position: 'fixed',
-          bottom: '20px',
-          right: '20px',
-          zIndex: 900,
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          padding: '6px 14px',
-          background: 'rgba(255, 255, 255, 0.92)',
-          backdropFilter: 'blur(12px)',
-          border: '1px solid rgba(229, 231, 235, 0.9)',
-          borderRadius: '20px',
-          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          color: '#4b5563',
-          textDecoration: 'none',
-          transition: 'all 0.2s ease',
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = '#0077b5';
-          e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 119, 181, 0.2)';
-          e.currentTarget.style.transform = 'translateY(-2px)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = 'rgba(229, 231, 235, 0.9)';
-          e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.08)';
-          e.currentTarget.style.transform = 'translateY(0)';
-        }}
-      >
-        <span>Built with</span>
-        <span style={{ color: '#ec4899', fontSize: '0.9rem' }}>♥</span>
-        <span>by</span>
-        <span style={{ color: '#0077b5', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
-          Vidhya Walke
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="#0077b5">
-            <path d="M19 3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14m-.5 15.5v-5.3a3.26 3.26 0 0 0-3.26-3.26c-.85 0-1.84.52-2.28 1.3v-1.11h-2.79v8.37h2.79v-4.93c0-.77.62-1.4 1.39-1.4a1.4 1.4 0 0 1 1.4 1.4v4.93h2.75M6.88 8.56a1.68 1.68 0 0 0 1.68-1.68c0-.93-.75-1.69-1.68-1.69a1.69 1.69 0 0 0-1.69 1.69c0 .93.76 1.68 1.69 1.68m1.39 9.94v-8.37H5.5v8.37h2.77z"/>
-          </svg>
-        </span>
-      </a>
 
       {/* Modals */}
       <FontPickerModal
