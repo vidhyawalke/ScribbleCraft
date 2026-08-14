@@ -8,11 +8,13 @@ export type ToolType =
   | 'line'
   | 'pencil'
   | 'text'
+  | 'image'
   | 'sticky'
   | 'eraser';
 
 export type FillStyle = 'solid' | 'hachure' | 'transparent';
 export type StrokeStyle = 'solid' | 'dashed' | 'dotted';
+export type AnchorPosition = 'top' | 'right' | 'bottom' | 'left' | 'center';
 
 export interface Point {
   x: number;
@@ -28,6 +30,7 @@ export interface CanvasElement {
   height: number;
   points?: Point[]; // For pencil, arrow, line
   text?: string;
+  imageUrl?: string; // For image elements
   strokeColor: string;
   fillColor: string;
   fillStyle: FillStyle;
@@ -40,6 +43,11 @@ export interface CanvasElement {
   stickyTape?: boolean;
   opacity?: number;
   zIndex: number;
+  // Wireframe connection bindings for arrows and lines
+  boundStartElementId?: string;
+  boundStartAnchor?: AnchorPosition;
+  boundEndElementId?: string;
+  boundEndAnchor?: AnchorPosition;
 }
 
 export interface Board {
@@ -51,7 +59,6 @@ export interface Board {
   bgColor: string;
   gridType: 'dots' | 'lines' | 'none';
 }
-
 
 export interface GoogleFont {
   family: string;
@@ -85,4 +92,3 @@ export interface CollabMessage {
   payload: any;
   timestamp: number;
 }
-

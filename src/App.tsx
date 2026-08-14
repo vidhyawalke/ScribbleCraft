@@ -33,7 +33,7 @@ export function App() {
   const [boards, setBoards] = useState<Board[]>(() => StorageService.getBoards());
   const [activeBoardId, setActiveBoardId] = useState<string>(() => StorageService.getActiveBoardId());
   const [activeTool, setActiveTool] = useState<ToolType>('select');
-  const [isToolLocked, setIsToolLocked] = useState<boolean>(false);
+  const [isBoardLocked, setIsBoardLocked] = useState<boolean>(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [zoom, setZoom] = useState<number>(1.0);
@@ -105,6 +105,8 @@ export function App() {
 
   // Push state to undo/redo history and broadcast to room
   const updateElements = useCallback((newElements: CanvasElement[], isRemote: boolean = false) => {
+    if (isBoardLocked) return;
+
     setBoards((prev) => {
       const current = prev.find((b) => b.id === activeBoardId) || prev[0];
       if (!current) return prev;
@@ -124,9 +126,10 @@ export function App() {
     if (!isRemote) {
       collabService.broadcastElements(newElements);
     }
-  }, [activeBoardId, historyIndex, collabService]);
+  }, [activeBoardId, historyIndex, collabService, isBoardLocked]);
 
   const handleUndo = useCallback(() => {
+    if (isBoardLocked) return;
     if (historyIndex > 0) {
       const prevElements = history[historyIndex - 1];
       setHistoryIndex((prev) => prev - 1);
@@ -139,9 +142,10 @@ export function App() {
       });
       collabService.broadcastElements(prevElements);
     }
-  }, [history, historyIndex, activeBoardId, collabService]);
+  }, [history, historyIndex, activeBoardId, collabService, isBoardLocked]);
 
   const handleRedo = useCallback(() => {
+    if (isBoardLocked) return;
     if (historyIndex < history.length - 1) {
       const nextElements = history[historyIndex + 1];
       setHistoryIndex((prev) => prev + 1);
@@ -154,12 +158,12 @@ export function App() {
       });
       collabService.broadcastElements(nextElements);
     }
-  }, [history, historyIndex, activeBoardId, collabService]);
+  }, [history, historyIndex, activeBoardId, collabService, isBoardLocked]);
 
   const selectedElement = activeBoard.elements.find((el) => el.id === selectedId) || null;
 
   const handleUpdateSelected = (updated: Partial<CanvasElement>) => {
-    if (!selectedId) return;
+    if (!selectedId || isBoardLocked) return;
     const newElements = activeBoard.elements.map((el) => {
       if (el.id === selectedId) {
         return { ...el, ...updated };
@@ -170,14 +174,54 @@ export function App() {
   };
 
   const handleDeleteSelected = useCallback(() => {
-    if (!selectedId) return;
+    if (!selectedId || isBoardLocked) return;
     updateElements(activeBoard.elements.filter((el) => el.id !== selectedId));
     setSelectedId(null);
-  }, [selectedId, activeBoard.elements, updateElements]);
+  }, [selectedId, activeBoard.elements, updateElements, isBoardLocked]);
+
+  // Insert Image file onto whiteboard
+  const handleInsertImage = useCallback((file: File, pos?: Point) => {
+    if (isBoardLocked) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (!dataUrl) return;
+
+      const img = new Image();
+      img.onload = () => {
+        const maxWidth = 340;
+        const width = Math.min(maxWidth, img.naturalWidth || 300);
+        const height = (width / (img.naturalWidth || 1)) * (img.naturalHeight || 200);
+
+        const id = `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        const imageElement: CanvasElement = {
+          id,
+          type: 'image',
+          imageUrl: dataUrl,
+          x: pos?.x ?? (400 - panOffset.x / zoom),
+          y: pos?.y ?? (200 - panOffset.y / zoom),
+          width,
+          height,
+          strokeColor: '#1e293b',
+          fillColor: 'transparent',
+          fillStyle: 'transparent',
+          strokeWidth: 2,
+          strokeStyle: 'solid',
+          zIndex: activeBoard.elements.length + 1,
+        };
+
+        updateElements([...activeBoard.elements, imageElement]);
+        setSelectedId(id);
+        setActiveTool('select');
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  }, [activeBoard.elements, isBoardLocked, panOffset, zoom, updateElements]);
 
   // Layer ordering actions
   const handleLayerChange = (action: 'bringToFront' | 'bringForward' | 'sendBackward' | 'sendToBack') => {
-    if (!selectedId) return;
+    if (!selectedId || isBoardLocked) return;
     const index = activeBoard.elements.findIndex((el) => el.id === selectedId);
     if (index === -1) return;
 
@@ -203,7 +247,6 @@ export function App() {
   // Full Keyboard Shortcuts Listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is currently typing in an input or textarea
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
         return;
@@ -253,7 +296,7 @@ export function App() {
         return;
       }
 
-      // Deselect or switch to selection tool on Escape
+      // Deselect on Escape
       if (e.key === 'Escape') {
         setSelectedId(null);
         setActiveTool('select');
@@ -261,6 +304,10 @@ export function App() {
       }
 
       // Tool selection shortcuts
+      if (isBoardLocked && e.key !== 'h' && e.key !== 'H' && e.key !== '1' && e.key !== 'v' && e.key !== 'V') {
+        return;
+      }
+
       switch (e.key) {
         case '1':
         case 'v':
@@ -303,6 +350,10 @@ export function App() {
           setActiveTool('text');
           break;
         case '9':
+        case 'i':
+        case 'I':
+          setActiveTool('image');
+          break;
         case 's':
         case 'S':
           setActiveTool('sticky');
@@ -321,7 +372,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, handleDeleteSelected]);
+  }, [handleUndo, handleRedo, handleDeleteSelected, isBoardLocked]);
 
   const handleShareRoom = () => {
     const shareUrl = collabService.getShareableUrl();
@@ -366,7 +417,7 @@ export function App() {
 
   return (
     <div className="app-container">
-      {/* SVG ClipPath Defs for Sticky Notes */}
+      {/* SVG ClipPath Defs */}
       <StickyNoteSvgDefs />
 
       {/* Toast Notification */}
@@ -394,15 +445,14 @@ export function App() {
               src="/logo.png" 
               alt="ScribbleCraft Logo" 
               style={{ 
-                height: '32px', 
+                height: '30px', 
                 width: 'auto', 
                 objectFit: 'contain',
-                filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))',
                 display: 'block' 
               }} 
             />
             <span className="board-tag">{activeBoard.name}</span>
-            <FolderKanban size={15} color="#6366f1" />
+            <FolderKanban size={14} color="#6366f1" />
           </div>
         </div>
 
@@ -410,18 +460,19 @@ export function App() {
         <Toolbar
           activeTool={activeTool}
           setActiveTool={setActiveTool}
-          isLocked={isToolLocked}
-          setIsLocked={setIsToolLocked}
+          isBoardLocked={isBoardLocked}
+          onToggleBoardLock={() => setIsBoardLocked((l) => !l)}
+          onInsertImage={handleInsertImage}
         />
 
         {/* Right Live Collaboration Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           {/* User Badge / Editable Name */}
           <div className="user-name-badge">
             <div
               style={{
-                width: '9px',
-                height: '9px',
+                width: '8px',
+                height: '8px',
                 borderRadius: '50%',
                 background: localUser.color || '#6366f1',
               }}
@@ -439,9 +490,9 @@ export function App() {
                   outline: 'none',
                   background: 'transparent',
                   fontWeight: 600,
-                  fontSize: '0.85rem',
+                  fontSize: '0.82rem',
                   color: '#111827',
-                  width: '100px',
+                  width: '90px',
                 }}
               />
             ) : (
@@ -461,7 +512,7 @@ export function App() {
             className="online-pill"
             title={`${collaborators.length + 1} users online in room`}
           >
-            <Users size={14} color="#6366f1" />
+            <Users size={13} color="#6366f1" />
             <span>{collaborators.length + 1} Online</span>
           </div>
 
@@ -470,7 +521,7 @@ export function App() {
             onClick={handleShareRoom}
             className="share-room-btn"
           >
-            <Share2 size={15} />
+            <Share2 size={14} />
             <span>Share Room</span>
           </button>
         </div>
@@ -489,18 +540,20 @@ export function App() {
           setPanOffset={setPanOffset}
           bgColor={activeBoard.bgColor}
           gridType={activeBoard.gridType}
+          isBoardLocked={isBoardLocked}
           collaborators={collaborators}
           onMouseMoveCursor={(point) => collabService.broadcastCursor(point)}
+          onInsertImage={handleInsertImage}
           onToolComplete={() => {
-            if (!isToolLocked && activeTool !== 'select' && activeTool !== 'hand') {
+            if (activeTool !== 'select' && activeTool !== 'hand') {
               setActiveTool('select');
             }
           }}
         />
       </main>
 
-      {/* Contextual Properties Inspector Panel (Left side, matching Screenshot 3 & 4) */}
-      {selectedElement && (
+      {/* Contextual Properties Inspector Panel (Left side) */}
+      {selectedElement && !isBoardLocked && (
         <PropertiesPanel
           selectedElement={selectedElement}
           onUpdateElement={handleUpdateSelected}
@@ -510,7 +563,7 @@ export function App() {
         />
       )}
 
-      {/* Bottom Floating Navigation Controls (Matching Screenshot 4) */}
+      {/* Bottom Floating Navigation Controls */}
       <div className="bottom-left-bar">
         {/* Zoom Controls Pill */}
         <div className="bottom-pill">
@@ -519,7 +572,7 @@ export function App() {
             onClick={() => setZoom((z) => Math.max(0.2, z - 0.1))}
             title="Zoom Out (Ctrl -)"
           >
-            <ZoomOut size={15} />
+            <ZoomOut size={14} />
           </button>
           <span className="zoom-text">{Math.round(zoom * 100)}%</span>
           <button
@@ -527,7 +580,7 @@ export function App() {
             onClick={() => setZoom((z) => Math.min(4.0, z + 0.1))}
             title="Zoom In (Ctrl +)"
           >
-            <ZoomIn size={15} />
+            <ZoomIn size={14} />
           </button>
         </div>
 
@@ -536,18 +589,18 @@ export function App() {
           <button
             className="btn-icon"
             onClick={handleUndo}
-            disabled={historyIndex <= 0}
+            disabled={historyIndex <= 0 || isBoardLocked}
             title="Undo (Ctrl+Z)"
           >
-            <RotateCcw size={15} />
+            <RotateCcw size={14} />
           </button>
           <button
             className="btn-icon"
             onClick={handleRedo}
-            disabled={historyIndex >= history.length - 1}
+            disabled={historyIndex >= history.length - 1 || isBoardLocked}
             title="Redo (Ctrl+Y)"
           >
-            <RotateCw size={15} />
+            <RotateCw size={14} />
           </button>
         </div>
 
@@ -563,16 +616,47 @@ export function App() {
             }}
             title="Toggle Grid (Dots/Lines/None)"
           >
-            <Grid size={15} />
+            <Grid size={14} />
           </button>
         </div>
       </div>
+
+      {/* Very Light Developer Credit at the Corner of the Page */}
+      <a
+        href="https://www.linkedin.com/in/vidhyawalke/"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Vidhya Walke on LinkedIn"
+        style={{
+          position: 'fixed',
+          bottom: '14px',
+          right: '18px',
+          zIndex: 800,
+          fontSize: '0.72rem',
+          fontWeight: 500,
+          color: '#9ca3af',
+          textDecoration: 'none',
+          letterSpacing: '0.01em',
+          transition: 'color 0.2s ease',
+          opacity: 0.85,
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.color = '#0077b5';
+          e.currentTarget.style.opacity = '1';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.color = '#9ca3af';
+          e.currentTarget.style.opacity = '0.85';
+        }}
+      >
+        developed by <span style={{ textDecoration: 'underline' }}>vidhya walke</span>
+      </a>
 
       {/* Modals */}
       <FontPickerModal
         isOpen={isFontModalOpen}
         onClose={() => setIsFontModalOpen(false)}
-        selectedFont={selectedElement?.fontFamily || 'Kalam'}
+        selectedFont={selectedElement?.fontFamily || 'Caveat'}
         onSelectFont={(fontFamily) => handleUpdateSelected({ fontFamily })}
       />
 

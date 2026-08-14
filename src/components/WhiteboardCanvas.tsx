@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { CanvasElement, ToolType, Point, Collaborator } from '../types';
+import { CanvasElement, ToolType, Point, Collaborator, AnchorPosition } from '../types';
 import { StickyNoteElement } from './StickyNoteElement';
 import { loadGoogleFont } from '../utils/googleFonts';
 
@@ -14,12 +14,23 @@ interface WhiteboardCanvasProps {
   setPanOffset: React.Dispatch<React.SetStateAction<Point>>;
   bgColor: string;
   gridType: 'dots' | 'lines' | 'none';
+  isBoardLocked?: boolean;
   collaborators?: Collaborator[];
   onMouseMoveCursor?: (point: Point) => void;
   onToolComplete?: () => void;
+  onInsertImage?: (file: File, pos?: Point) => void;
 }
 
 type ResizeHandle = 'nw' | 'ne' | 'se' | 'sw' | 'rotate' | null;
+
+interface SnapAnchor {
+  elementId: string;
+  anchor: AnchorPosition;
+  point: Point;
+}
+
+// Global Image Cache for Canvas 2D
+const imageCache: { [url: string]: HTMLImageElement } = {};
 
 export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   elements,
@@ -32,9 +43,11 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   setPanOffset,
   bgColor,
   gridType,
+  isBoardLocked = false,
   collaborators = [],
   onMouseMoveCursor,
   onToolComplete,
+  onInsertImage,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -50,6 +63,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
   const [dragOffset, setDragOffset] = useState<Point>({ x: 0, y: 0 });
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle>(null);
   const [initialResizeBox, setInitialResizeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+
+  // Active Connection Snap Anchor for wireframes
+  const [activeSnapAnchor, setActiveSnapAnchor] = useState<SnapAnchor | null>(null);
 
   // Active Inline Text Editor
   const [editingText, setEditingText] = useState<{
@@ -78,13 +94,50 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     }
   }, [editingText]);
 
-  const getCanvasCoords = (e: React.MouseEvent): Point => {
+  const getCanvasCoords = (e: React.MouseEvent | React.DragEvent): Point => {
     if (!containerRef.current) return { x: 0, y: 0 };
     const rect = containerRef.current.getBoundingClientRect();
     return {
       x: (e.clientX - rect.left - panOffset.x) / zoom,
       y: (e.clientY - rect.top - panOffset.y) / zoom,
     };
+  };
+
+  // Calculate Anchor Points of a Shape
+  const getElementAnchors = (el: CanvasElement): { anchor: AnchorPosition; point: Point }[] => {
+    const { x, y, width, height } = el;
+    return [
+      { anchor: 'top', point: { x: x + width / 2, y } },
+      { anchor: 'right', point: { x: x + width, y: y + height / 2 } },
+      { anchor: 'bottom', point: { x: x + width / 2, y: y + height } },
+      { anchor: 'left', point: { x, y: y + height / 2 } },
+    ];
+  };
+
+  // Find Closest Anchor Point Near Given Coordinate
+  const findClosestAnchor = (pos: Point, ignoreElementId?: string): SnapAnchor | null => {
+    const snapDistance = 24 / zoom;
+    let closest: SnapAnchor | null = null;
+    let minDistance = snapDistance;
+
+    elements.forEach((el) => {
+      if (el.id === ignoreElementId || el.type === 'arrow' || el.type === 'line' || el.type === 'pencil') return;
+
+      const anchors = getElementAnchors(el);
+      anchors.forEach(({ anchor, point }) => {
+        const dist = Math.hypot(pos.x - point.x, pos.y - point.y);
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = {
+            elementId: el.id,
+            anchor,
+            point,
+          };
+        }
+      });
+    });
+
+    return closest;
   };
 
   const getHandleAtPosition = (pos: Point, el: CanvasElement): ResizeHandle => {
@@ -105,6 +158,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     return null;
   };
 
+  // Render Canvas
   const renderCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -157,8 +211,6 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     sorted.forEach((el) => {
       if (el.type === 'sticky') return; // Handled by DOM component
-
-      // Skip rendering text if currently editing it
       if (el.type === 'text' && editingText && editingText.id === el.id) return;
 
       ctx.save();
@@ -178,11 +230,10 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       switch (el.type) {
         case 'rectangle': {
           ctx.beginPath();
-          ctx.roundRect(el.x, el.y, el.width, el.height, 6);
+          ctx.roundRect(el.x, el.y, el.width, el.height, 8);
           if (el.fillColor && el.fillColor !== 'transparent') ctx.fill();
           ctx.stroke();
 
-          // Render centered label text inside shape if present
           if (el.text) {
             ctx.font = `${el.fontSize || 18}px '${el.fontFamily || 'Architects Daughter'}', cursive, sans-serif`;
             ctx.fillStyle = el.strokeColor || '#1e293b';
@@ -236,6 +287,21 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           }
           break;
         }
+        case 'image': {
+          if (el.imageUrl) {
+            let cached = imageCache[el.imageUrl];
+            if (!cached) {
+              cached = new Image();
+              cached.src = el.imageUrl;
+              cached.onload = () => renderCanvas();
+              imageCache[el.imageUrl] = cached;
+            }
+            if (cached.complete && cached.naturalWidth > 0) {
+              ctx.drawImage(cached, el.x, el.y, el.width, el.height);
+            }
+          }
+          break;
+        }
         case 'line':
         case 'arrow': {
           if (el.points && el.points.length >= 2) {
@@ -263,6 +329,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               ctx.closePath();
               ctx.fill();
             }
+
+            // If bound, render anchor connection point dot (Screenshot 1 & 3)
+            if (el.boundEndElementId) {
+              ctx.beginPath();
+              ctx.arc(el.x + p2.x, el.y + p2.y, 4, 0, Math.PI * 2);
+              ctx.fillStyle = '#3b82f6';
+              ctx.fill();
+            }
           }
           break;
         }
@@ -287,14 +361,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       }
 
       // Selection bounding box outline and handles (Screenshot 4)
-      if (selectedId === el.id && !editingText) {
+      if (selectedId === el.id && !editingText && !isBoardLocked) {
         const padding = 4 / zoom;
         const boxX = el.x - padding;
         const boxY = el.y - padding;
         const boxW = el.width + padding * 2;
         const boxH = el.height + padding * 2;
 
-        ctx.strokeStyle = '#818cf8'; // Soft lavender/indigo
+        ctx.strokeStyle = '#818cf8';
         ctx.lineWidth = 1.5 / zoom;
         ctx.setLineDash([]);
         ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -339,8 +413,19 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       ctx.restore();
     });
 
+    // Render Active Wireframe Snap Anchor (Blue Connection Dot)
+    if (activeSnapAnchor) {
+      ctx.beginPath();
+      ctx.arc(activeSnapAnchor.point.x, activeSnapAnchor.point.y, 6 / zoom, 0, Math.PI * 2);
+      ctx.fillStyle = '#3b82f6';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2 / zoom;
+      ctx.stroke();
+    }
+
     ctx.restore();
-  }, [elements, zoom, panOffset, selectedId, currentElement, bgColor, gridType, editingText]);
+  }, [elements, zoom, panOffset, selectedId, currentElement, bgColor, gridType, editingText, activeSnapAnchor, isBoardLocked]);
 
   // Resize canvas
   useEffect(() => {
@@ -360,6 +445,26 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     renderCanvas();
   }, [renderCanvas]);
 
+  // Paste image handler (Ctrl+V)
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      if (isBoardLocked) return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const file = items[i].getAsFile();
+          if (file && onInsertImage) {
+            onInsertImage(file, { x: 300 - panOffset.x / zoom, y: 250 - panOffset.y / zoom });
+          }
+        }
+      }
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [isBoardLocked, onInsertImage, panOffset, zoom]);
+
   // Mouse Down Event
   const handleMouseDown = (e: React.MouseEvent) => {
     // If clicking outside while text editing, commit text editor first
@@ -376,6 +481,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       setStartPoint({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
       return;
     }
+
+    if (isBoardLocked) return;
 
     const pos = getCanvasCoords(e);
 
@@ -401,7 +508,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         x: pos.x,
         y: pos.y,
         text: '',
-        fontSize: 22,
+        fontSize: 24,
         fontFamily: 'Architects Daughter',
         strokeColor: '#1e293b',
         isNew: true,
@@ -446,9 +553,20 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       return;
     }
 
-    // 4. Drawing Geometric Shapes & Sticky Notes
+    // 4. Drawing Geometric Shapes, Arrows, Lines & Sticky Notes
     setIsDrawing(true);
     setStartPoint(pos);
+
+    // Check if arrow starts at a snap anchor of another shape
+    let boundStartId: string | undefined;
+    let boundStartAnchor: AnchorPosition | undefined;
+    if (activeTool === 'arrow' || activeTool === 'line') {
+      const startSnap = findClosestAnchor(pos);
+      if (startSnap) {
+        boundStartId = startSnap.elementId;
+        boundStartAnchor = startSnap.anchor;
+      }
+    }
 
     const id = `el_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     const newEl: CanvasElement = {
@@ -456,21 +574,23 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       type: activeTool,
       x: pos.x,
       y: pos.y,
-      width: activeTool === 'sticky' ? 260 : 0,
-      height: activeTool === 'sticky' ? 260 : 0,
+      width: activeTool === 'sticky' ? 280 : 0,
+      height: activeTool === 'sticky' ? 280 : 0,
       points: activeTool === 'pencil' || activeTool === 'line' || activeTool === 'arrow' ? [{ x: 0, y: 0 }] : undefined,
       strokeColor: activeTool === 'sticky' ? '#333333' : '#1e1e1e',
-      fillColor: activeTool === 'sticky' ? '#bbebff' : 'transparent',
+      fillColor: activeTool === 'sticky' ? '#ffeaa7' : 'transparent',
       fillStyle: 'solid',
       strokeWidth: 2,
       strokeStyle: 'solid',
-      fontFamily: activeTool === 'sticky' ? 'Kalam' : 'Architects Daughter',
-      fontSize: activeTool === 'sticky' ? 24 : 22,
-      stickyBg: activeTool === 'sticky' ? '#bbebff' : undefined,
-      stickyRotation: activeTool === 'sticky' ? (Math.random() * 2 - 1) : 0,
+      fontFamily: activeTool === 'sticky' ? 'Caveat' : 'Architects Daughter',
+      fontSize: activeTool === 'sticky' ? 26 : 22,
+      stickyBg: activeTool === 'sticky' ? '#ffeaa7' : undefined,
+      stickyRotation: activeTool === 'sticky' ? -0.5 : 0,
       stickyTape: true,
-      text: activeTool === 'sticky' ? 'New Sticky Note 📝' : undefined,
+      text: activeTool === 'sticky' ? 'Double-click to type note...' : undefined,
       zIndex: elements.length + 1,
+      boundStartElementId: boundStartId,
+      boundStartAnchor,
     };
 
     if (activeTool === 'sticky') {
@@ -485,6 +605,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
   // Double Click Handler to edit text inside shape or text element
   const handleDoubleClick = (e: React.MouseEvent) => {
+    if (isBoardLocked) return;
     const pos = getCanvasCoords(e);
     const clicked = [...elements].reverse().find((el) => {
       return (
@@ -526,6 +647,8 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       return;
     }
 
+    if (isBoardLocked) return;
+
     // Resizing selected element
     if (activeResizeHandle && selectedId && initialResizeBox) {
       const dx = pos.x - startPoint.x;
@@ -560,23 +683,60 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       return;
     }
 
-    // Dragging selected element
+    // Dragging selected element and updating connected wireframe lines
     if (isDraggingElement && selectedId) {
+      const newX = pos.x - dragOffset.x;
+      const newY = pos.y - dragOffset.y;
+
       const updated = elements.map((el) => {
         if (el.id === selectedId) {
           return {
             ...el,
-            x: pos.x - dragOffset.x,
-            y: pos.y - dragOffset.y,
+            x: newX,
+            y: newY,
           };
+        }
+        // Update connected arrows/lines bound to this moved element
+        if (el.type === 'arrow' || el.type === 'line') {
+          let points = el.points ? [...el.points] : [{ x: 0, y: 0 }, { x: el.width, y: el.height }];
+          let updatedArrow = false;
+
+          if (el.boundStartElementId === selectedId && el.boundStartAnchor) {
+            const movedEl = elements.find((item) => item.id === selectedId);
+            if (movedEl) {
+              const anchors = getElementAnchors({ ...movedEl, x: newX, y: newY });
+              const match = anchors.find((a) => a.anchor === el.boundStartAnchor);
+              if (match) {
+                points[0] = { x: match.point.x - el.x, y: match.point.y - el.y };
+                updatedArrow = true;
+              }
+            }
+          }
+
+          if (el.boundEndElementId === selectedId && el.boundEndAnchor) {
+            const movedEl = elements.find((item) => item.id === selectedId);
+            if (movedEl) {
+              const anchors = getElementAnchors({ ...movedEl, x: newX, y: newY });
+              const match = anchors.find((a) => a.anchor === el.boundEndAnchor);
+              if (match) {
+                points[points.length - 1] = { x: match.point.x - el.x, y: match.point.y - el.y };
+                updatedArrow = true;
+              }
+            }
+          }
+
+          if (updatedArrow) {
+            return { ...el, points };
+          }
         }
         return el;
       });
+
       onUpdateElements(updated);
       return;
     }
 
-    // Drawing new shape/stroke
+    // Drawing new shape/arrow/line
     if (isDrawing && currentElement) {
       if (currentElement.type === 'pencil') {
         const points = [...(currentElement.points || []), { x: pos.x - currentElement.x, y: pos.y - currentElement.y }];
@@ -591,6 +751,25 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           width: maxX - minX || 10,
           height: maxY - minY || 10,
         });
+      } else if (currentElement.type === 'arrow' || currentElement.type === 'line') {
+        // Check for snap anchor on endpoint
+        const snap = findClosestAnchor(pos);
+        setActiveSnapAnchor(snap);
+
+        const targetPos = snap ? snap.point : pos;
+        const width = targetPos.x - startPoint.x;
+        const height = targetPos.y - startPoint.y;
+
+        setCurrentElement({
+          ...currentElement,
+          x: startPoint.x,
+          y: startPoint.y,
+          width,
+          height,
+          points: [{ x: 0, y: 0 }, { x: width, y: height }],
+          boundEndElementId: snap?.elementId,
+          boundEndAnchor: snap?.anchor,
+        });
       } else {
         const width = pos.x - startPoint.x;
         const height = pos.y - startPoint.y;
@@ -600,9 +779,6 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           y: height < 0 ? pos.y : startPoint.y,
           width: Math.abs(width),
           height: Math.abs(height),
-          points: currentElement.type === 'arrow' || currentElement.type === 'line' 
-            ? [{ x: 0, y: 0 }, { x: width, y: height }] 
-            : undefined,
         });
       }
     }
@@ -619,6 +795,9 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
     if (activeResizeHandle) {
       setActiveResizeHandle(null);
       setInitialResizeBox(null);
+    }
+    if (activeSnapAnchor) {
+      setActiveSnapAnchor(null);
     }
     if (isDrawing && currentElement) {
       setIsDrawing(false);
@@ -641,12 +820,26 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         x: mouseX - (mouseX - panOffset.x) * (newZoom / zoom),
         y: mouseY - (mouseY - panOffset.y) * (newZoom / zoom),
       });
-      // setZoom in parent
     } else {
       setPanOffset((prev) => ({
         x: prev.x - e.deltaX,
         y: prev.y - e.deltaY,
       }));
+    }
+  };
+
+  // Drag & Drop Image Files Directly onto Canvas
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (isBoardLocked) return;
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type.startsWith('image/') && onInsertImage) {
+      const pos = getCanvasCoords(e);
+      onInsertImage(file, pos);
     }
   };
 
@@ -657,14 +850,14 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 
     if (editingText.isNew) {
       if (trimmed) {
-        const textWidth = Math.max(100, trimmed.length * 12);
+        const textWidth = Math.max(120, trimmed.length * 14);
         const newTextEl: CanvasElement = {
           id: editingText.id || `text_${Date.now()}`,
           type: 'text',
           x: editingText.x,
           y: editingText.y,
           width: textWidth,
-          height: 36,
+          height: 38,
           text: trimmed,
           strokeColor: editingText.strokeColor || '#1e293b',
           fillColor: 'transparent',
@@ -672,7 +865,7 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
           strokeWidth: 2,
           strokeStyle: 'solid',
           fontFamily: editingText.fontFamily || 'Architects Daughter',
-          fontSize: editingText.fontSize || 22,
+          fontSize: editingText.fontSize || 24,
           zIndex: elements.length + 1,
         };
         onUpdateElements([...elements, newTextEl]);
@@ -704,11 +897,15 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
       onMouseUp={handleMouseUp}
       onDoubleClick={handleDoubleClick}
       onWheel={handleWheel}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
       style={{
         width: '100%',
         height: '100%',
         position: 'relative',
-        cursor: activeTool === 'hand' 
+        cursor: isBoardLocked
+          ? 'default'
+          : activeTool === 'hand' 
           ? (isPanning ? 'grabbing' : 'grab') 
           : activeTool === 'text'
           ? 'text'
@@ -752,18 +949,18 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             placeholder="Type text here..."
             style={{
               fontFamily: `'${editingText.fontFamily || 'Architects Daughter'}', cursive, sans-serif`,
-              fontSize: `${(editingText.fontSize || 22) * zoom}px`,
+              fontSize: `${(editingText.fontSize || 24) * zoom}px`,
               color: editingText.strokeColor || '#1e293b',
-              background: 'rgba(255, 255, 255, 0.95)',
+              background: 'rgba(255, 255, 255, 0.96)',
               border: '2px dashed #6366f1',
               borderRadius: '6px',
-              padding: '6px 10px',
+              padding: '6px 12px',
               outline: 'none',
               resize: 'both',
               minWidth: `${140 * zoom}px`,
-              minHeight: `${40 * zoom}px`,
+              minHeight: `${42 * zoom}px`,
               lineHeight: 1.3,
-              boxShadow: '0 4px 14px rgba(99, 102, 241, 0.25)',
+              boxShadow: '0 4px 16px rgba(99, 102, 241, 0.3)',
             }}
           />
         </div>
@@ -782,15 +979,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
         {elements
           .filter((el) => el.type === 'sticky')
           .map((el) => (
-            <div key={el.id} style={{ pointerEvents: 'auto' }}>
+            <div key={el.id} style={{ pointerEvents: isBoardLocked ? 'none' : 'auto' }}>
               <StickyNoteElement
                 element={el}
                 isSelected={selectedId === el.id}
                 onSelect={(e) => {
                   e.stopPropagation();
-                  onSelectElement(el.id);
+                  if (!isBoardLocked) onSelectElement(el.id);
                 }}
                 onUpdateText={(id, text) => {
+                  if (isBoardLocked) return;
                   const updated = elements.map((item) => (item.id === id ? { ...item, text } : item));
                   onUpdateElements(updated);
                 }}

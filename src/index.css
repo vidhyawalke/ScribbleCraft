@@ -257,6 +257,16 @@ html, body, #root {
   opacity: 1;
 }
 
+.tool-btn.locked-btn {
+  background: #ede9fe;
+  border: 1px solid #c7d2fe;
+}
+
+.tool-btn.disabled-tool {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .divider {
   width: 1px;
   height: 20px;
