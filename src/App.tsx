@@ -237,8 +237,18 @@ export function App() {
 
       {/* Top Header Bar */}
       <header className="top-header">
-        <div className="brand-badge" onClick={() => setIsBoardDrawerOpen(true)}>
-          <span className="brand-title">ScribbleCraft</span>
+        <div className="brand-badge" onClick={() => setIsBoardDrawerOpen(true)} title="Click to manage boards">
+          <img 
+            src="/logo.png" 
+            alt="ScribbleCraft Logo" 
+            style={{ 
+              height: '34px', 
+              width: 'auto', 
+              objectFit: 'contain',
+              filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))',
+              display: 'block' 
+            }} 
+          />
           <span className="board-tag">{activeBoard.name}</span>
           <FolderKanban size={16} color="#6366f1" />
         </div>

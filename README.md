@@ -1,6 +1,12 @@
-# 🎨 ScribbleCraft
+<p align="center">
+  <img src="public/logo.png" alt="ScribbleCraft Logo" width="320" />
+</p>
 
-> An Excalidraw-like collaborative whiteboard built with React, TypeScript, and WebRTC. Features organic Google handwriting fonts, realistic paper sticky notes, live multi-user collaboration with remote cursors, and zero-login access.
+<h1 align="center">🎨 ScribbleCraft</h1>
+
+<p align="center">
+  <em>An Excalidraw-like collaborative whiteboard built with React, TypeScript, and WebRTC. Features organic Google handwriting fonts, realistic paper sticky notes, live multi-user collaboration with remote cursors, and zero-login access.</em>
+</p>
 
 ---
 

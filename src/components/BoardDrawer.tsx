@@ -78,13 +78,20 @@ export const BoardDrawer: React.FC<BoardDrawerProps> = ({
       >
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <div>
-            <h2 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <FolderKanban size={22} color="#4f46e5" /> Workspace Boards
-            </h2>
-            <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: '2px' }}>
-              Manage, switch, and backup your whiteboard canvases.
-            </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <img 
+              src="/logo.png" 
+              alt="ScribbleCraft" 
+              style={{ height: '40px', width: 'auto', objectFit: 'contain' }} 
+            />
+            <div>
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <FolderKanban size={18} color="#4f46e5" /> Workspace Boards
+              </h2>
+              <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: '2px' }}>
+                Manage, switch, and backup your whiteboard canvases.
+              </p>
+            </div>
           </div>
           <button className="btn-icon" onClick={onClose}>
             <X size={20} />
